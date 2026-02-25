@@ -3,7 +3,7 @@ name: Manual Release
   workflow_dispatch:
     inputs:
       version:
-        description: "Release Version"
+        description: "Release Version. First 3 digits match upstream. Final digit is local increment (e.g. v1.11.6.0)"
         required: true
 
 jobs:
