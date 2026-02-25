@@ -21,6 +21,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/mitchellh/cli"
+	"github.com/opentofu/opentofu/internal/command/workdir"
 	"github.com/zclconf/go-cty/cty"
 
 	"github.com/opentofu/opentofu/internal/addrs"
@@ -47,6 +48,7 @@ func TestApply(t *testing.T) {
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
 			View:             view,
 		},
@@ -82,6 +84,7 @@ func TestApply_conditionalSensitive(t *testing.T) {
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
 			View:             view,
 		},
@@ -112,6 +115,7 @@ func TestApply_path(t *testing.T) {
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
 			View:             view,
 		},
@@ -151,6 +155,7 @@ func TestApply_approveNo(t *testing.T) {
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
 			Ui:               ui,
 			View:             view,
@@ -195,6 +200,7 @@ func TestApply_approveYes(t *testing.T) {
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
 			Ui:               ui,
 			View:             view,
@@ -239,6 +245,7 @@ func TestApply_lockedState(t *testing.T) {
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
 			View:             view,
 		},
@@ -283,6 +290,7 @@ func TestApply_lockedStateWait(t *testing.T) {
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
 			View:             view,
 		},
@@ -382,6 +390,7 @@ func TestApply_parallelism(t *testing.T) {
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: testingOverrides,
 			View:             view,
 		},
@@ -410,6 +419,7 @@ func TestApply_configInvalid(t *testing.T) {
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
 			View:             view,
 		},
@@ -438,6 +448,7 @@ func TestApply_defaultState(t *testing.T) {
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
 			View:             view,
 		},
@@ -479,6 +490,7 @@ func TestApply_error(t *testing.T) {
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
 			View:             view,
 		},
@@ -568,6 +580,7 @@ func TestApply_input(t *testing.T) {
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
 			View:             view,
 		},
@@ -614,6 +627,7 @@ func TestApply_inputPartial(t *testing.T) {
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
 			View:             view,
 		},
@@ -652,6 +666,7 @@ func TestApply_noArgs(t *testing.T) {
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
 			View:             view,
 		},
@@ -693,6 +708,7 @@ func TestApply_plan(t *testing.T) {
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
 			View:             view,
 		},
@@ -726,6 +742,7 @@ func TestApply_plan_backup(t *testing.T) {
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
 			View:             view,
 		},
@@ -769,6 +786,7 @@ func TestApply_plan_noBackup(t *testing.T) {
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
 			View:             view,
 		},
@@ -803,7 +821,7 @@ func TestApply_plan_remoteState(t *testing.T) {
 	test = false
 	defer func() { test = true }()
 	tmp := testCwdTemp(t)
-	remoteStatePath := filepath.Join(tmp, DefaultDataDir, DefaultStateFilename)
+	remoteStatePath := filepath.Join(tmp, workdir.DefaultDataDir, DefaultStateFilename)
 	if err := os.MkdirAll(filepath.Dir(remoteStatePath), 0755); err != nil {
 		t.Fatalf("err: %s", err)
 	}
@@ -852,6 +870,7 @@ func TestApply_plan_remoteState(t *testing.T) {
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
 			View:             view,
 		},
@@ -893,6 +912,7 @@ func TestApply_planWithVarFile(t *testing.T) {
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
 			View:             view,
 		},
@@ -926,6 +946,7 @@ func TestApply_planVars(t *testing.T) {
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
 			View:             view,
 		},
@@ -956,6 +977,7 @@ func TestApply_planNoModuleFiles(t *testing.T) {
 	view, done := testView(t)
 	apply := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
 			Ui:               new(cli.MockUi),
 			View:             view,
@@ -998,6 +1020,7 @@ func TestApply_refresh(t *testing.T) {
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
 			View:             view,
 		},
@@ -1066,6 +1089,7 @@ func TestApply_refreshFalse(t *testing.T) {
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
 			View:             view,
 		},
@@ -1101,14 +1125,19 @@ func TestApply_shutdown(t *testing.T) {
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
 			View:             view,
 			ShutdownCh:       shutdownCh,
 		},
 	}
 
+	// Provider is started multiple times, plus it's left running after the schema call
+	var stopOnce sync.Once
 	p.StopFn = func() error {
-		close(cancelled)
+		stopOnce.Do(func() {
+			close(cancelled)
+		})
 		return nil
 	}
 
@@ -1215,6 +1244,7 @@ func TestApply_state(t *testing.T) {
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
 			View:             view,
 		},
@@ -1279,6 +1309,7 @@ func TestApply_stateNoExist(t *testing.T) {
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
 			View:             view,
 		},
@@ -1304,6 +1335,7 @@ func TestApply_sensitiveOutput(t *testing.T) {
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
 			View:             view,
 		},
@@ -1343,6 +1375,7 @@ func TestApply_vars(t *testing.T) {
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
 			View:             view,
 		},
@@ -1405,6 +1438,7 @@ func TestApply_varFile(t *testing.T) {
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
 			View:             view,
 		},
@@ -1467,6 +1501,7 @@ func TestApply_varFileDefault(t *testing.T) {
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
 			View:             view,
 		},
@@ -1528,6 +1563,7 @@ func TestApply_varFileDefaultJSON(t *testing.T) {
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
 			View:             view,
 		},
@@ -1609,6 +1645,7 @@ func TestApply_backup(t *testing.T) {
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
 			View:             view,
 		},
@@ -1669,6 +1706,7 @@ func TestApply_disableBackup(t *testing.T) {
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
 			View:             view,
 		},
@@ -1740,6 +1778,7 @@ func TestApply_tfWorkspace(t *testing.T) {
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
 			View:             view,
 		},
@@ -1777,6 +1816,7 @@ func TestApply_tofuWorkspace(t *testing.T) {
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
 			View:             view,
 		},
@@ -1812,7 +1852,8 @@ func TestApply_tfWorkspaceNonDefault(t *testing.T) {
 		ui := new(cli.MockUi)
 		newCmd := &WorkspaceNewCommand{
 			Meta: Meta{
-				Ui: ui,
+				WorkingDir: workdir.NewDir("."),
+				Ui:         ui,
 			},
 		}
 		if code := newCmd.Run([]string{"test"}); code != 0 {
@@ -1826,7 +1867,8 @@ func TestApply_tfWorkspaceNonDefault(t *testing.T) {
 		ui := new(cli.MockUi)
 		selCmd := &WorkspaceSelectCommand{
 			Meta: Meta{
-				Ui: ui,
+				WorkingDir: workdir.NewDir("."),
+				Ui:         ui,
 			},
 		}
 		if code := selCmd.Run(args); code != 0 {
@@ -1838,6 +1880,7 @@ func TestApply_tfWorkspaceNonDefault(t *testing.T) {
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
 			View:             view,
 		},
@@ -1874,7 +1917,8 @@ func TestApply_tofuWorkspaceNonDefault(t *testing.T) {
 		ui := new(cli.MockUi)
 		newCmd := &WorkspaceNewCommand{
 			Meta: Meta{
-				Ui: ui,
+				WorkingDir: workdir.NewDir("."),
+				Ui:         ui,
 			},
 		}
 		if code := newCmd.Run([]string{"test"}); code != 0 {
@@ -1888,7 +1932,8 @@ func TestApply_tofuWorkspaceNonDefault(t *testing.T) {
 		ui := new(cli.MockUi)
 		selCmd := &WorkspaceSelectCommand{
 			Meta: Meta{
-				Ui: ui,
+				WorkingDir: workdir.NewDir("."),
+				Ui:         ui,
 			},
 		}
 		if code := selCmd.Run(args); code != 0 {
@@ -1900,6 +1945,7 @@ func TestApply_tofuWorkspaceNonDefault(t *testing.T) {
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
 			View:             view,
 		},
@@ -1951,6 +1997,7 @@ func TestApply_targeted(t *testing.T) {
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
 			View:             view,
 		},
@@ -1988,7 +2035,8 @@ func TestApply_targetFlagsDiags(t *testing.T) {
 			view, done := testView(t)
 			c := &ApplyCommand{
 				Meta: Meta{
-					View: view,
+					WorkingDir: workdir.NewDir("."),
+					View:       view,
 				},
 			}
 
@@ -2040,6 +2088,7 @@ func TestApply_excluded(t *testing.T) {
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
 			View:             view,
 		},
@@ -2076,7 +2125,8 @@ func TestApply_excludeFlagsDiags(t *testing.T) {
 			view, done := testView(t)
 			c := &ApplyCommand{
 				Meta: Meta{
-					View: view,
+					WorkingDir: workdir.NewDir("."),
+					View:       view,
 				},
 			}
 
@@ -2160,6 +2210,7 @@ func TestApply_replace(t *testing.T) {
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
 			View:             view,
 		},
@@ -2201,6 +2252,7 @@ func TestApply_pluginPath(t *testing.T) {
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
 			View:             view,
 		},
@@ -2241,6 +2293,7 @@ func TestApply_jsonGoldenReference(t *testing.T) {
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
 			View:             view,
 		},
@@ -2296,6 +2349,7 @@ func TestApply_warnings(t *testing.T) {
 		view, done := testView(t)
 		c := &ApplyCommand{
 			Meta: Meta{
+				WorkingDir:       workdir.NewDir("."),
 				testingOverrides: metaOverridesForProvider(p),
 				View:             view,
 			},
@@ -2322,6 +2376,7 @@ func TestApply_warnings(t *testing.T) {
 		view, done := testView(t)
 		c := &ApplyCommand{
 			Meta: Meta{
+				WorkingDir:       workdir.NewDir("."),
 				testingOverrides: metaOverridesForProvider(p),
 				View:             view,
 			},
@@ -2355,6 +2410,7 @@ func TestApply_showSensitiveArg(t *testing.T) {
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
 			View:             view,
 		},
@@ -2434,6 +2490,7 @@ func TestApply_CreateBeforeDestroyWithRefreshFalse(t *testing.T) {
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
 			View:             view,
 		},
@@ -2469,6 +2526,7 @@ func TestApply_concise(t *testing.T) {
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Meta: Meta{
+			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
 			View:             view,
 		},

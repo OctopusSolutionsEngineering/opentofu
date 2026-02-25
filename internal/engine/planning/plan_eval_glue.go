@@ -15,7 +15,6 @@ import (
 
 	"github.com/opentofu/opentofu/internal/addrs"
 	"github.com/opentofu/opentofu/internal/collections"
-	"github.com/opentofu/opentofu/internal/engine/internal/execgraph"
 	"github.com/opentofu/opentofu/internal/lang/eval"
 	"github.com/opentofu/opentofu/internal/plans/objchange"
 	"github.com/opentofu/opentofu/internal/providers"
@@ -48,57 +47,52 @@ func (p *planGlue) ValidateProviderConfig(ctx context.Context, provider addrs.Pr
 // active concurrently and so this function must take care to avoid races.
 func (p *planGlue) PlanDesiredResourceInstance(ctx context.Context, inst *eval.DesiredResourceInstance) (cty.Value, tfdiags.Diagnostics) {
 	log.Printf("[TRACE] planContext: planning desired resource instance %s", inst.Addr)
+
 	// The details of how we plan vary considerably depending on the resource
-	// mode, so we'll dispatch each one to a separate function before we do
-	// anything else.
-	var plannedVal cty.Value
-	var resultRef execgraph.ResourceInstanceResultRef
+	// mode, so we'll dispatch each one to a separate function after we've
+	// dealt with some common preparation work.
+	var obj *resourceInstanceObject
 	var diags tfdiags.Diagnostics
-	egb := p.planCtx.execgraphBuilder
 	switch mode := inst.Addr.Resource.Resource.Mode; mode {
 	case addrs.ManagedResourceMode:
-		plannedVal, resultRef, diags = p.planDesiredManagedResourceInstance(ctx, inst, egb)
+		obj, diags = p.planDesiredManagedResourceInstance(ctx, inst)
 	case addrs.DataResourceMode:
-		plannedVal, resultRef, diags = p.planDesiredDataResourceInstance(ctx, inst, egb)
+		obj, diags = p.planDesiredDataResourceInstance(ctx, inst)
 	case addrs.EphemeralResourceMode:
-		plannedVal, resultRef, diags = p.planDesiredEphemeralResourceInstance(ctx, inst, egb)
+		obj, diags = p.planDesiredEphemeralResourceInstance(ctx, inst)
 	default:
 		// We should not get here because the cases above should always be
 		// exhaustive for all of the valid resource modes.
-		var diags tfdiags.Diagnostics
 		diags = diags.Append(fmt.Errorf("the planning engine does not support %s; this is a bug in OpenTofu", mode))
 		return cty.DynamicVal, diags
 	}
-
-	if diags.HasErrors() {
-		return cty.DynamicVal, diags
-	}
-	log.Printf("[TRACE] planContext: final result for %s comes from %#v", inst.Addr, resultRef)
-	p.planCtx.execgraphBuilder.SetResourceInstanceFinalStateResult(inst.Addr, resultRef)
-	return plannedVal, diags
+	p.planCtx.resourceInstObjs.Put(obj)
+	return obj.ResultValue(), diags
 }
 
 func (p *planGlue) planOrphanResourceInstance(ctx context.Context, addr addrs.AbsResourceInstance, state *states.ResourceInstanceObjectFullSrc) tfdiags.Diagnostics {
 	log.Printf("[TRACE] planContext: planning orphan resource instance %s", addr)
+	var obj *resourceInstanceObject
+	var diags tfdiags.Diagnostics
 	switch mode := addr.Resource.Resource.Mode; mode {
 	case addrs.ManagedResourceMode:
-		return p.planOrphanManagedResourceInstance(ctx, addr, state, p.planCtx.execgraphBuilder)
+		obj, diags = p.planOrphanManagedResourceInstance(ctx, addr, state)
 	case addrs.DataResourceMode:
-		return p.planOrphanDataResourceInstance(ctx, addr, state, p.planCtx.execgraphBuilder)
+		obj, diags = p.planOrphanDataResourceInstance(ctx, addr, state)
 	case addrs.EphemeralResourceMode:
 		// It should not be possible for an ephemeral resource to be an
 		// orphan because ephemeral resources should never be persisted
 		// in a state snapshot.
-		var diags tfdiags.Diagnostics
 		diags = diags.Append(fmt.Errorf("unexpected ephemeral resource instance %s in prior state; this is a bug in OpenTofu", addr))
 		return diags
 	default:
 		// We should not get here because the cases above should always be
 		// exhaustive for all of the valid resource modes.
-		var diags tfdiags.Diagnostics
 		diags = diags.Append(fmt.Errorf("the planning engine does not support %s; this is a bug in OpenTofu", mode))
 		return diags
 	}
+	p.planCtx.resourceInstObjs.Put(obj)
+	return diags
 }
 
 func (p *planGlue) planDeposedResourceInstanceObject(ctx context.Context, addr addrs.AbsResourceInstance, deposedKey states.DeposedKey, state *states.ResourceInstanceObjectFullSrc) tfdiags.Diagnostics {
@@ -110,7 +104,9 @@ func (p *planGlue) planDeposedResourceInstanceObject(ctx context.Context, addr a
 		diags = diags.Append(fmt.Errorf("deposed object for non-managed resource instance %s; this is a bug in OpenTofu", addr))
 		return diags
 	}
-	return p.planDeposedManagedResourceInstanceObject(ctx, addr, deposedKey, state, p.planCtx.execgraphBuilder)
+	obj, diags := p.planDeposedManagedResourceInstanceObject(ctx, addr, deposedKey, state)
+	p.planCtx.resourceInstObjs.Put(obj)
+	return diags
 }
 
 // PlanModuleCallInstanceOrphans implements eval.PlanGlue.
@@ -295,49 +291,6 @@ func (p *planGlue) PlanResourceOrphans(ctx context.Context, moduleInstAddr addrs
 // provider has an invalid configuration.
 func (p *planGlue) providerClient(ctx context.Context, addr addrs.AbsProviderInstanceCorrect) (providers.Configured, tfdiags.Diagnostics) {
 	return p.planCtx.providerInstances.ProviderClient(ctx, addr, p)
-}
-
-// providerInstanceCompletionEvents returns all of the [completionEvent] values
-// that need to have been reported to the completion tracker before an
-// instance of the given provider can be closed.
-func (p *planGlue) providerInstanceCompletionEvents(ctx context.Context, addr addrs.AbsProviderInstanceCorrect) iter.Seq[completionEvent] {
-	return func(yield func(completionEvent) bool) {
-		configUsers := p.oracle.ProviderInstanceUsers(ctx, addr)
-		for _, resourceInstAddr := range configUsers.ResourceInstances {
-			event := resourceInstancePlanningComplete{resourceInstAddr.UniqueKey()}
-			if !yield(event) {
-				return
-			}
-		}
-		// We also need to wait for the completion of anything we can find
-		// in the state, just in case any resource instances are "orphaned"
-		// and in case there are any deposed objects we need to deal with.
-		for _, modState := range p.planCtx.prevRoundState.Modules {
-			for _, resourceState := range modState.Resources {
-				for instKey, instanceState := range resourceState.Instances {
-					resourceInstAddr := resourceState.Addr.Instance(instKey)
-					// FIXME: State is still using the not-quite-right address
-					// types for provider instances, so we'll shim here.
-					providerInstAddr := resourceState.ProviderConfig.InstanceCorrect(instanceState.ProviderKey)
-					if !addr.Equal(providerInstAddr) {
-						continue // not for this provider instance
-					}
-					if instanceState.Current != nil {
-						event := resourceInstancePlanningComplete{resourceInstAddr.UniqueKey()}
-						if !yield(event) {
-							return
-						}
-					}
-					for dk := range instanceState.Deposed {
-						event := resourceInstanceDeposedPlanningComplete{resourceInstAddr.UniqueKey(), dk}
-						if !yield(event) {
-							return
-						}
-					}
-				}
-			}
-		}
-	}
 }
 
 func (p *planGlue) desiredResourceInstanceMustBeDeferred(inst *eval.DesiredResourceInstance) bool {
