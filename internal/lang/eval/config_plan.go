@@ -115,14 +115,11 @@ type PlanGlue interface {
 // actions to destroy any instances that are currently tracked but no longer
 // configured.
 func (c *ConfigInstance) DrivePlanning(ctx context.Context, buildGlue func(*PlanningOracle) PlanGlue) (*PlanningResult, tfdiags.Diagnostics) {
+	var diags tfdiags.Diagnostics
+
 	// All of our work will be associated with a workgraph worker that serves
 	// as the initial worker node in the work graph.
 	ctx = grapheval.ContextWithNewWorker(ctx)
-
-	relationships, diags := c.prepareToPlan(ctx)
-	if diags.HasErrors() {
-		return nil, diags
-	}
 
 	// We have a little chicken vs. egg problem here where we can't fully
 	// initialize the oracle until we've built the root module instance,
@@ -142,7 +139,6 @@ func (c *ConfigInstance) DrivePlanning(ctx context.Context, buildGlue func(*Plan
 	}
 	// We can now initialize the planning oracle, before we start evaluating
 	// anything that might cause calls to the evalGlue object.
-	oracle.relationships = relationships
 	oracle.rootModuleInstance = rootModuleInstance
 	oracle.evalContext = c.evalContext
 
@@ -230,6 +226,19 @@ func (p *planningEvalGlue) ResourceInstanceValue(ctx context.Context, ri *config
 		ConfigVal:                 configgraph.PrepareOutgoingValue(configVal),
 		Provider:                  ri.Provider,
 		RequiredResourceInstances: riDeps,
+		ResourceType:              ri.Addr.Resource.Resource.Type,
+		ResourceMode:              ri.Addr.Resource.Resource.Mode,
+
+		// This reflects the direct create_before_destroy setting of just
+		// this one resource instance. During the planning phase we'll
+		// propagate "create-before-destroy-ness" to anything else in the
+		// same dependency chain as an instance with this set, but we
+		// can't do that until after the plan phase has discovered the
+		// entire resource instance graph.
+		//
+		// FIXME: Actually take this setting from the config. For now we
+		// just always assume it isn't set.
+		CreateBeforeDestroy: false,
 	}
 	if providerInst, ok := configgraph.GetKnown(providerInst); ok {
 		desired.ProviderInstance = &providerInst.Addr

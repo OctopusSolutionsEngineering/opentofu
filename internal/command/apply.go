@@ -12,6 +12,7 @@ import (
 
 	"github.com/opentofu/opentofu/internal/backend"
 	"github.com/opentofu/opentofu/internal/command/arguments"
+	"github.com/opentofu/opentofu/internal/command/flags"
 	"github.com/opentofu/opentofu/internal/command/views"
 	"github.com/opentofu/opentofu/internal/encryption"
 	"github.com/opentofu/opentofu/internal/plans/planfile"
@@ -44,18 +45,20 @@ func (c *ApplyCommand) Run(rawArgs []string) int {
 
 	// Parse and validate flags
 	var args *arguments.Apply
+	var closer func()
 	switch {
 	case c.Destroy:
-		args, diags = arguments.ParseApplyDestroy(rawArgs)
+		args, closer, diags = arguments.ParseApplyDestroy(rawArgs)
 	default:
-		args, diags = arguments.ParseApply(rawArgs)
+		args, closer, diags = arguments.ParseApply(rawArgs)
 	}
+	defer closer()
 
 	c.View.SetShowSensitive(args.ShowSensitive)
 
 	// Instantiate the view, even if there are flag errors, so that we render
 	// diagnostics according to the desired view
-	view := views.NewApply(args.ViewType, c.Destroy, c.View)
+	view := views.NewApply(args.ViewOptions, c.Destroy, c.View)
 
 	if diags.HasErrors() {
 		view.Diagnostics(diags)
@@ -92,7 +95,7 @@ func (c *ApplyCommand) Run(rawArgs []string) int {
 	// FIXME: the -input flag value is needed to initialize the backend and the
 	// operation, but there is no clear path to pass this value down, so we
 	// continue to mutate the Meta object state for now.
-	c.Meta.input = args.InputEnabled
+	c.Meta.input = args.ViewOptions.InputEnabled
 
 	// FIXME: the -parallelism flag is used to control the concurrency of
 	// OpenTofu operations. At the moment, this value is used both to
@@ -104,7 +107,7 @@ func (c *ApplyCommand) Run(rawArgs []string) int {
 
 	// Prepare the backend, passing the plan file if present, and the
 	// backend-specific arguments
-	be, beDiags := c.PrepareBackend(ctx, planFile, args.State, args.ViewType, enc.State())
+	be, beDiags := c.PrepareBackend(ctx, planFile, args.State, args.ViewOptions, enc.State())
 	diags = diags.Append(beDiags)
 	if diags.HasErrors() {
 		view.Diagnostics(diags)
@@ -197,7 +200,7 @@ func (c *ApplyCommand) LoadPlanFile(path string, enc encryption.Encryption) (*pl
 	return planFile, diags
 }
 
-func (c *ApplyCommand) PrepareBackend(ctx context.Context, planFile *planfile.WrappedPlanFile, args *arguments.State, viewType arguments.ViewType, enc encryption.StateEncryption) (backend.Enhanced, tfdiags.Diagnostics) {
+func (c *ApplyCommand) PrepareBackend(ctx context.Context, planFile *planfile.WrappedPlanFile, args *arguments.State, viewOptions arguments.ViewOptions, enc encryption.StateEncryption) (backend.Enhanced, tfdiags.Diagnostics) {
 	var diags tfdiags.Diagnostics
 
 	// FIXME: we need to apply the state arguments to the meta object here
@@ -238,8 +241,8 @@ func (c *ApplyCommand) PrepareBackend(ctx context.Context, planFile *planfile.Wr
 		}
 
 		be, beDiags = c.Backend(ctx, &BackendOpts{
-			Config:   backendConfig,
-			ViewType: viewType,
+			Config:      backendConfig,
+			ViewOptions: viewOptions,
 		}, enc)
 	}
 
@@ -266,7 +269,7 @@ func (c *ApplyCommand) OperationRequest(
 	diags = diags.Append(c.providerDevOverrideRuntimeWarnings())
 
 	// Build the operation
-	opReq := c.Operation(ctx, be, applyArgs.ViewType, enc)
+	opReq := c.Operation(ctx, be, applyArgs.ViewOptions, enc)
 	opReq.AutoApprove = applyArgs.AutoApprove
 	opReq.SuppressForgetErrorsDuringDestroy = applyArgs.SuppressForgetErrorsDuringDestroy
 	opReq.ConfigDir = "."
@@ -299,12 +302,12 @@ func (c *ApplyCommand) GatherVariables(args *arguments.Vars) {
 	// package directly, removing this shim layer.
 
 	varArgs := args.All()
-	items := make([]rawFlag, len(varArgs))
+	items := make([]flags.RawFlag, len(varArgs))
 	for i := range varArgs {
 		items[i].Name = varArgs[i].Name
 		items[i].Value = varArgs[i].Value
 	}
-	c.Meta.variableArgs = rawFlags{items: &items}
+	c.Meta.variableArgs = flags.RawFlags{Items: &items}
 }
 
 func (c *ApplyCommand) Help() string {
@@ -400,6 +403,11 @@ Options:
   -json                        Produce output in a machine-readable JSON format,
                                suitable for use in text editor integrations and
                                other automated systems. Always disables color.
+
+  -json-into=out.json          Produce the same output as -json, but sent directly
+                               to the given file. This allows automation to preserve
+                               the original human-readable output streams, while
+                               capturing more detailed logs for machine analysis.
 
   -deprecation=module:m        Specify what type of warnings are shown. Accepted
                                values for "m": all, local, none. Default: all.
