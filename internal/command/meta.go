@@ -323,7 +323,7 @@ type testingOverrides struct {
 // statePath, stateOutPath, and backupPath
 func (m *Meta) initStatePaths() {
 	if m.statePath == "" {
-		m.statePath = DefaultStateFilename
+		m.statePath = arguments.DefaultStateFilename
 	}
 	if m.stateOutPath == "" {
 		m.stateOutPath = m.statePath
@@ -602,19 +602,6 @@ func (m *Meta) defaultFlagSet(n string) *flag.FlagSet {
 	return f
 }
 
-// ignoreRemoteVersionFlagSet add the ignore-remote version flag to suppress
-// the error when the configured OpenTofu version on the remote workspace
-// does not match the local OpenTofu version.
-func (m *Meta) ignoreRemoteVersionFlagSet(n string) *flag.FlagSet {
-	f := m.defaultFlagSet(n)
-
-	m.varFlagSet(f)
-
-	f.BoolVar(&m.ignoreRemoteVersion, "ignore-remote-version", false, "continue even if remote and local OpenTofu versions are incompatible")
-
-	return f
-}
-
 func (m *Meta) varFlagSet(f *flag.FlagSet) {
 	if m.variableArgs.Items == nil {
 		m.variableArgs = flags.NewRawFlags("-var")
@@ -727,11 +714,6 @@ func (m *Meta) configureUiFromView(options arguments.ViewOptions) {
 	}
 	// compared with Meta.process, this method does not configure the Meta.View, since that is the
 	// responsibility of the caller of this method.
-}
-
-// uiHook returns the UiHook to use with the context.
-func (m *Meta) uiHook() *views.UiHook {
-	return views.NewUiHook(m.View)
 }
 
 // confirm asks a yes/no confirmation.

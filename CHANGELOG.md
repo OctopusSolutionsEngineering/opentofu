@@ -11,6 +11,7 @@ UPGRADE NOTES:
 
 ENHANCEMENTS:
 
+- Module registries can now return `use_registry_credentials` in the download location response to indicate that package downloads should use the same `TF_TOKEN_*` credentials as registry API calls, eliminating the need for separate `.netrc` configuration. ([#3313](https://github.com/opentofu/opentofu/issues/3313))
 - `prevent_destroy` arguments in the `lifecycle` block for managed resources can now use references to other symbols in the same module, such as to a module's input variables. ([#3474](https://github.com/opentofu/opentofu/issues/3474), [#3507](https://github.com/opentofu/opentofu/issues/3507))
 - New `lifecycle` meta-argument `destroy` for altering resource destruction behavior. When set to `false` OpenTofu will not retain resources when they are planned for destruction. ([#3409](https://github.com/opentofu/opentofu/pull/3409))
 - New `-suppress-forget-errors` flag for the `tofu destroy` command to suppress errors and exit with a zero status code when resources are forgotten during destroy operations. ([#3588](https://github.com/opentofu/opentofu/issues/3588))
@@ -21,6 +22,9 @@ ENHANCEMENTS:
 - Comparing an object or other complex-typed value to `null` using the `==` operator now returns a sensitive boolean result only if the object as a whole is sensitive, and not when the object merely contains a sensitive value nested inside one of its attributes. This means that comparisons to null can now be used in parts of the configuration where sensitive values are not allowed, such as in the `enabled` meta-argument on resources and modules. ([#3793](https://github.com/opentofu/opentofu/pull/3793))
 - New CLI argument `-json-into=<outfile>` has been added to support emitting both human readable and machine readable logs ([#3606](https://github.com/opentofu/opentofu/pull/3606))
 - The `s3` backend now automatically discovers and uses AWS credentials issued using [the `aws login` command](https://docs.aws.amazon.com/cli/latest/reference/login/) in AWS CLI. ([#3767](https://github.com/opentofu/opentofu/pull/3767))
+- The `tofu console` command now supports two new flags: `-lock` and `-lock-timeout`. Having these, the interactive mode can be used without locking the state. ([#3800](https://github.com/opentofu/opentofu/pull/3800))
+- The `azurerm` backend now supports authentication using Azure DevOps / Azure Pipelines workload identity federation ([#3820](https://github.com/opentofu/opentofu/pull/3820))
+- Resources using `replace_triggered_by` in their `lifecycle` block will now be replaced when a resource they reference is itself being replaced, not only when it is being updated. ([#3714](https://github.com/opentofu/opentofu/issues/3714))
 
 BUG FIXES:
 
@@ -38,6 +42,8 @@ BUG FIXES:
 - Add `universe_domain` option in the `gcs` backend to support sovereign GCP services ([#3758](https://github.com/opentofu/opentofu/issues/3758))
 - Fixed `tofu init` crashing when a module `version` uses a variable and the module is referenced from a test file. ([#3686](https://github.com/opentofu/opentofu/issues/3686))
 - Fixed `local-exec` and `file` provisioners crashing when a required attribute (`command` or `destination`) is set to `null`. ([#3783](https://github.com/opentofu/opentofu/issues/3783))
+- Fixed provider-defined functions in `import` block `id` expressions causing "BUG: Uninitialized function provider" error. ([#3803](https://github.com/opentofu/opentofu/issues/3803))
+- In JSON syntax, key_provider expressions now can be written in raw string syntax or using template interpolation syntax. Previously only the template interpolation syntax was allowed, which was inconsistent with other parts of the encryption configuration. ([#3794](https://github.com/opentofu/opentofu/issues/3794))
 
 ## Previous Releases
 
