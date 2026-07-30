@@ -12,7 +12,6 @@ import (
 	"testing"
 
 	"github.com/davecgh/go-spew/spew"
-	"github.com/mitchellh/cli"
 	"github.com/opentofu/opentofu/internal/command/workdir"
 	"github.com/zclconf/go-cty/cty"
 
@@ -163,16 +162,12 @@ func TestApply_destroyApproveNo(t *testing.T) {
 		"approve": "no",
 	})()
 
-	// Do not use the NewMockUi initializer here, as we want to delay
-	// the call to init until after setting up the input mocks
-	ui := new(cli.MockUi)
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Destroy: true,
 		Meta: Meta{
 			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
-			Ui:               ui,
 			View:             view,
 		},
 	}
@@ -233,16 +228,12 @@ func TestApply_destroyApproveYes(t *testing.T) {
 		"approve": "yes",
 	})()
 
-	// Do not use the NewMockUi initializer here, as we want to delay
-	// the call to init until after setting up the input mocks
-	ui := new(cli.MockUi)
 	view, done := testView(t)
 	c := &ApplyCommand{
 		Destroy: true,
 		Meta: Meta{
 			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
-			Ui:               ui,
 			View:             view,
 		},
 	}
@@ -438,6 +429,7 @@ func TestApply_destroySkipInConfigAndState(t *testing.T) {
 		},
 	}
 
+	t.Cleanup(testInputMap(t, map[string]string{"approve": "yes"}))
 	args := []string{
 		"-state", statePath,
 	}
@@ -510,6 +502,7 @@ func TestApply_destroySkipWithSuppressFlag(t *testing.T) {
 		},
 	}
 
+	t.Cleanup(testInputMap(t, map[string]string{"approve": "yes"}))
 	// with the suppress flag, the destroy should succeed even with forgotten instances
 	args := []string{
 		"-suppress-forget-errors",
@@ -568,7 +561,6 @@ func TestApply_destroySkipInStateNotInConfig(t *testing.T) {
 		)
 	})
 	statePath := testStateFile(t, originalState)
-
 	p := applyFixtureProvider()
 
 	view, done := testView(t)
@@ -581,6 +573,7 @@ func TestApply_destroySkipInStateNotInConfig(t *testing.T) {
 		},
 	}
 
+	t.Cleanup(testInputMap(t, map[string]string{"approve": "yes"}))
 	args := []string{
 		"-state", statePath,
 	}
@@ -650,6 +643,7 @@ func TestApply_destroySkipInStateOrphaned(t *testing.T) {
 			View:             view,
 		},
 	}
+	t.Cleanup(testInputMap(t, map[string]string{"approve": "yes"}))
 
 	args := []string{
 		"-state", statePath,

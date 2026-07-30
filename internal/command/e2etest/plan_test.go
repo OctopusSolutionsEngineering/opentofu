@@ -73,7 +73,7 @@ found no differences, so no changes are needed.
 │ 
 │ output deprecated
 │ 
-│ (and 2 more similar warnings elsewhere)
+│ (and one more similar warning elsewhere)
 ╵
 ╷
 │ Warning: Value derived from a deprecated source
@@ -86,11 +86,11 @@ found no differences, so no changes are needed.
 │ 
 │ output deprecated
 │ 
-│ (and 2 more similar warnings elsewhere)
+│ (and one more similar warning elsewhere)
 ╵
 `
 		if diff := cmp.Diff(strings.TrimSpace(stripAnsi(planStdout)), strings.TrimSpace(stripAnsi(expectedOutput))); diff != "" {
-			t.Errorf("wrong output.\n%s", diff)
+			t.Errorf("wrong output.\n%s\ngot: %s\nexpected: %s", diff, stripAnsi(planStdout), stripAnsi(expectedOutput))
 		}
 	})
 }
@@ -132,8 +132,8 @@ func TestPlanOnDeprecated(t *testing.T) {
 func TestPlanOnMultipleDeprecatedMarksSliceBug(t *testing.T) {
 	t.Parallel()
 
-	// Test for [the bug](https://github.com/opentofu/opentofu/issues/3104) where modifying 
-	// pathMarks slice during iteration would cause slice bounds errors when multiple 
+	// Test for [the bug](https://github.com/opentofu/opentofu/issues/3104) where modifying
+	// pathMarks slice during iteration would cause slice bounds errors when multiple
 	// deprecated marks exist
 	fixturePath := filepath.Join("testdata", "multiple-deprecated-marks-slice-bug")
 	tf := e2e.NewBinary(t, tofuBin, fixturePath)
@@ -155,7 +155,7 @@ func TestPlanOnMultipleDeprecatedMarksSliceBug(t *testing.T) {
 			"trigger = {",
 			"Value derived from a deprecated source",
 			"Use new_out1",
-			"Use new_out2", 
+			"Use new_out2",
 			"Use new_out3",
 		}
 

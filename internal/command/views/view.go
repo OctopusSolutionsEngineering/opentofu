@@ -6,26 +6,23 @@
 package views
 
 import (
-	"fmt"
 	"maps"
 
 	"github.com/hashicorp/hcl/v2"
 	"github.com/mitchellh/colorstring"
+	"github.com/opentofu/opentofu/internal/addrs"
 	"github.com/opentofu/opentofu/internal/command/arguments"
 	"github.com/opentofu/opentofu/internal/command/format"
 	"github.com/opentofu/opentofu/internal/terminal"
 	"github.com/opentofu/opentofu/internal/tfdiags"
-	"github.com/opentofu/opentofu/internal/tofu"
 )
 
 // View is the base layer for command views, encapsulating a set of I/O
 // streams, a colorize implementation, and implementing a human friendly view
 // for diagnostics.
 type View struct {
-	streams    *terminal.Streams
-	colorize   *colorstring.Colorize
-	errorColor string
-	warnColor  string
+	streams  *terminal.Streams
+	colorize *colorstring.Colorize
 
 	compactWarnings     bool
 	consolidateWarnings bool
@@ -43,7 +40,7 @@ type View struct {
 	concise bool
 
 	// ModuleDeprecationWarnLvl is used to filter out deprecation warnings for outputs and variables as requested by the user.
-	ModuleDeprecationWarnLvl tofu.DeprecationWarningLevel
+	ModuleDeprecationWarnLvl arguments.DeprecationWarningLevel
 
 	// showSensitive is used to display the value of variables marked as sensitive.
 	showSensitive bool
@@ -57,6 +54,11 @@ type View struct {
 	// will be dereferenced as late as possible when rendering diagnostics in
 	// order to access the config loader cache.
 	configSources func() map[string]*hcl.File
+
+	// These other unfortunate warts are required to enable correct deduplication
+	// and filtering of deprecation diagnostics
+	isRemoteModuleSource func(addrs.Module) bool
+	moduleSourceAddrs    func(addrs.Module) addrs.ModuleSource
 }
 
 // Initialize a View with the given streams, a disabled colorize object, and a
@@ -69,9 +71,9 @@ func NewView(streams *terminal.Streams) *View {
 			Disable: true,
 			Reset:   true,
 		},
-		errorColor:    "[red]",
-		warnColor:     "[yellow]",
-		configSources: func() map[string]*hcl.File { return nil },
+		configSources:        func() map[string]*hcl.File { return nil },
+		isRemoteModuleSource: func(addrs.Module) bool { return false },
+		moduleSourceAddrs:    func(addrs.Module) addrs.ModuleSource { return nil },
 		diagsPrinter: func(severity tfdiags.Severity, msg string) {
 			if severity == tfdiags.Error {
 				_, _ = streams.Eprint(msg)
@@ -128,6 +130,14 @@ func (v *View) SetConfigSources(cb func() map[string]*hcl.File) {
 	v.configSources = cb
 }
 
+func (v *View) SetIsRemoteModuleSource(cb func(addrs.Module) bool) {
+	v.isRemoteModuleSource = cb
+}
+
+func (v *View) SetModuleSourceAddrs(cb func(addrs.Module) addrs.ModuleSource) {
+	v.moduleSourceAddrs = cb
+}
+
 // Diagnostics renders a set of warnings and errors in human-readable form.
 // Warnings are printed to stdout, and errors to stderr.
 func (v *View) Diagnostics(diags tfdiags.Diagnostics) {
@@ -138,27 +148,28 @@ func (v *View) Diagnostics(diags tfdiags.Diagnostics) {
 	}
 
 	// Filter the deprecation warnings based on the cli arg.
-	// For safety and performance reasons, we are filtering the deprecation related diagnostics only when
-	// the filtering level is not tofu.DeprecationWarningLevelAll.
-	// This filtering is implemented only in here, and not in meta.go#showDiagnostics because there are meant to be
-	// shown only during apply and plan phases. These 2 phases are using this implementation to interact with the user
-	// while meta.go#showDiagnostics is used by other commands that are not meant to show the deprecation diagnostics.
-	if v.ModuleDeprecationWarnLvl != tofu.DeprecationWarningLevelAll {
-		var newDiags tfdiags.Diagnostics
-		for _, diag := range diags {
-			if !tofu.DeprecationDiagnosticAllowed(v.ModuleDeprecationWarnLvl, diag) {
-				continue
-			}
-			newDiags = append(newDiags, diag)
+	var newDiags tfdiags.Diagnostics
+	seen := DeprecationDiagnosticAllowedSeen{}
+	for _, diag := range diags {
+		if !v.DeprecationDiagnosticAllowed(diag, seen) {
+			continue
 		}
-		diags = newDiags
+		newDiags = append(newDiags, diag)
 	}
+	diags = newDiags
 
 	if v.consolidateWarnings {
-		diags = diags.Consolidate(1, tfdiags.Warning)
+		diags = diags.Consolidate(1, tfdiags.Warning, func(diag tfdiags.Diagnostic) string {
+			// Check to see if we have a DeprecationCause
+			depExtra := v.DeprecationKeyExtra(diag)
+			if depExtra != "" {
+				return depExtra
+			}
+			return tfdiags.DefaultDiagnosticsConsolidation(diag)
+		})
 	}
 	if v.consolidateErrors {
-		diags = diags.Consolidate(1, tfdiags.Error)
+		diags = diags.Consolidate(1, tfdiags.Error, tfdiags.DefaultDiagnosticsConsolidation)
 	}
 
 	// Since warning messages are generally competing
@@ -248,26 +259,15 @@ func (v *View) SetShowSensitive(showSensitive bool) {
 	v.showSensitive = showSensitive
 }
 
-// error is an unexported method that can be used by other views to send to stderr the given message fully colored in
-// [View#errorColor].
-// This adds a new line after the message.
-func (v *View) errorln(message string) {
-	_, _ = v.streams.Eprintln(v.colorMessage(message, v.errorColor))
+// Colorize returns the [colorstring.Colorize] object within to be used in other places.
+// TODO meta-refactor: this is a temporary solution. This should not be exposed. Whoever needs to use this
+//
+//	should do it through a View implementation instead.
+func (v *View) Colorize() *colorstring.Colorize {
+	return v.colorize
 }
 
-// warnln is an unexported method that can be used by other views to send to stdout the given message fully colored in
-// [View#warnColor].
-// This adds a new line after the message.
-func (v *View) warnln(message string) {
-	// Warning messages are meant to go to stdout as pointed out here: https://github.com/opentofu/opentofu/commit/0c3bb316ea56aacf5108883d1a269a53744fdd43
-	_, _ = v.streams.Println(v.colorMessage(message, v.warnColor))
-}
-
-// colorMessage is a utility method to easily color the whole given message in one color.
-func (v *View) colorMessage(message string, color string) string {
-	if color == "" {
-		return message
-	}
-
-	return v.colorize.Color(fmt.Sprintf("%s%s", color, message))
+// StdinPiped returns true if the input is piped.
+func (v *View) StdinPiped() bool {
+	return !v.streams.Stdin.IsTerminal()
 }

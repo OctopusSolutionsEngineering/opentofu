@@ -588,7 +588,7 @@ func TestEvaluatorGetResource_changes(t *testing.T) {
 	}
 	schema, _ := schemas.ResourceTypeConfig(addrs.NewDefaultProvider("test"), addr.Mode, addr.Type)
 	// This encoding separates out the After's marks into its AfterValMarks
-	csrc, _ := change.Encode(schema.ImpliedType())
+	csrc, _ := change.Encode(schema)
 	changesSync.AppendResourceInstanceChange(csrc)
 
 	evaluator := &Evaluator{
@@ -642,21 +642,38 @@ func TestEvaluatorGetResource_changes(t *testing.T) {
 }
 
 func TestEvaluatorGetResource_Ephemeral(t *testing.T) {
-	rc := &configs.Resource{
+	rc := configs.Resource{
 		Mode: addrs.EphemeralResourceMode,
 		Type: "test_resource",
 		Name: "foo",
 		Config: configs.SynthBody("", map[string]cty.Value{
 			"secret_name": cty.StringVal("foo"),
+			"name":        cty.StringVal("bar"),
 		}),
 		Provider: mustProviderConfig(`provider["registry.opentofu.org/hashicorp/test"]`).Provider,
 	}
+	rcWithCount := configs.Resource{
+		Mode: addrs.EphemeralResourceMode,
+		Type: "test_resource",
+		Name: "foo",
+		Config: configs.SynthBody("", map[string]cty.Value{
+			"secret_name": cty.StringVal("foo"),
+			"name":        cty.StringVal("bar"),
+		}),
+		Count:    hcl.StaticExpr(cty.NumberIntVal(1), hcl.Range{}),
+		Provider: mustProviderConfig(`provider["registry.opentofu.org/hashicorp/test"]`).Provider,
+	}
+
 	ephemeralSchema := providers.Schema{
 		Block: &configschema.Block{
 			Attributes: map[string]*configschema.Attribute{
 				"id": {
 					Type:     cty.String,
 					Computed: true,
+				},
+				"name": {
+					Type:     cty.String,
+					Required: true,
 				},
 				"value": {
 					Type:     cty.String,
@@ -681,56 +698,32 @@ func TestEvaluatorGetResource_Ephemeral(t *testing.T) {
 		},
 	}
 	tests := map[string]struct {
-		changes *plans.ChangesSync
-		state   *states.SyncState
-		want    cty.Value
+		state  *states.SyncState
+		resCfg configs.Resource
+		want   cty.Value
 	}{
-		"no changes and no state": {
-			plans.NewChanges().SyncWrapper(),
+		"no state": {
 			states.NewState().SyncWrapper(),
+			rc,
+			cty.ObjectVal(map[string]cty.Value{
+				"id":          cty.UnknownVal(cty.String),
+				"value":       cty.UnknownVal(cty.String),
+				"name":        cty.UnknownVal(cty.String),
+				"nesting_map": cty.UnknownVal(cty.Set(cty.Object(map[string]cty.Type{"foo": cty.String}))),
+			}).Mark(marks.Ephemeral),
+		},
+		"no state and for_each": {
+			states.NewState().SyncWrapper(),
+			rcWithCount,
 			cty.DynamicVal.Mark(marks.Ephemeral),
 		},
-		"with state and planned changes": {
-			plans.BuildChanges(func(sync *plans.ChangesSync) {
-				sync.AppendResourceInstanceChange(
-					&plans.ResourceInstanceChangeSrc{
-						Addr:        rc.Addr().Instance(addrs.NoKey).Absolute(addrs.RootModuleInstance),
-						PrevRunAddr: rc.Addr().Instance(addrs.NoKey).Absolute(addrs.RootModuleInstance),
-						DeposedKey:  states.NotDeposed,
-						ProviderAddr: addrs.AbsProviderConfig{
-							Provider: rc.Provider,
-							Module:   addrs.RootModule,
-						},
-						ChangeSrc: plans.ChangeSrc{
-							After: encodeDynamicValue(t, cty.ObjectVal(map[string]cty.Value{
-								"id":    cty.StringVal("foo"),
-								"value": cty.StringVal("tacos"),
-								"nesting_map": cty.SetVal([]cty.Value{
-									cty.ObjectVal(map[string]cty.Value{
-										"foo": cty.StringVal("test"),
-									}),
-								}),
-							})),
-							AfterValMarks: []cty.PathValueMarks{
-								{
-									Path: cty.GetAttrPath("nesting_map").Index(cty.ObjectVal(map[string]cty.Value{"foo": cty.StringVal("test")})).GetAttr("foo"),
-									Marks: map[interface{}]struct{}{
-										// added the ephemeral mark here to validate that it is removed and the
-										// sensitive one is added based on the schema
-										marks.Ephemeral: {},
-									},
-								},
-							},
-						},
-					},
-				)
-			}).SyncWrapper(),
+		"with state": {
 			states.BuildState(func(state *states.SyncState) {
 				state.SetResourceInstanceCurrent(
 					rc.Addr().Instance(addrs.NoKey).Absolute(addrs.RootModuleInstance),
 					&states.ResourceInstanceObjectSrc{
 						Status:    states.ObjectPlanned,
-						AttrsJSON: []byte(`{"id":"foo", "val":"tacos"}`),
+						AttrsJSON: []byte(`{"id": "foo", "name": "bar", "value": "tacos", "nesting_map": [{"foo":"test"}]}`),
 					},
 					addrs.AbsProviderConfig{
 						Provider: rc.Provider,
@@ -739,9 +732,11 @@ func TestEvaluatorGetResource_Ephemeral(t *testing.T) {
 					addrs.NoKey,
 				)
 			}).SyncWrapper(),
+			rc,
 			cty.ObjectVal(map[string]cty.Value{
 				"id":    cty.StringVal("foo"),
 				"value": cty.StringVal("tacos"),
+				"name":  cty.StringVal("bar"),
 				"nesting_map": cty.SetVal([]cty.Value{
 					cty.ObjectVal(map[string]cty.Value{
 						// expected to have this attribute marked as sensitive but not as ephemeral
@@ -751,14 +746,15 @@ func TestEvaluatorGetResource_Ephemeral(t *testing.T) {
 				}),
 			}).Mark(marks.Ephemeral),
 		},
-		"with object ready state and no changes": {
-			plans.BuildChanges(func(sync *plans.ChangesSync) {}).SyncWrapper(),
+		"with defered state": {
 			states.BuildState(func(state *states.SyncState) {
 				state.SetResourceInstanceCurrent(
 					rc.Addr().Instance(addrs.NoKey).Absolute(addrs.RootModuleInstance),
 					&states.ResourceInstanceObjectSrc{
-						Status:    states.ObjectReady,
-						AttrsJSON: []byte(`{"id":"foo", "value":"tacos", "nesting_map": [{"foo": "test"}]}`),
+						Status: states.ObjectPlanned,
+						// NOTE: during decoding, null values will be converted to unknown
+						AttrsJSON: []byte(`{"id":null,"name":"bar","nesting_map":null,"value":null}`),
+						Deferred:  true,
 					},
 					addrs.AbsProviderConfig{
 						Provider: rc.Provider,
@@ -767,9 +763,34 @@ func TestEvaluatorGetResource_Ephemeral(t *testing.T) {
 					addrs.NoKey,
 				)
 			}).SyncWrapper(),
+			rc,
+			cty.ObjectVal(map[string]cty.Value{
+				"id":          cty.UnknownVal(cty.String),
+				"value":       cty.UnknownVal(cty.String),
+				"name":        cty.StringVal("bar"),
+				"nesting_map": cty.NullVal(cty.Set(cty.Object(map[string]cty.Type{"foo": cty.String}))),
+			}).Mark(marks.Ephemeral),
+		},
+		"with object ready state": {
+			states.BuildState(func(state *states.SyncState) {
+				state.SetResourceInstanceCurrent(
+					rc.Addr().Instance(addrs.NoKey).Absolute(addrs.RootModuleInstance),
+					&states.ResourceInstanceObjectSrc{
+						Status:    states.ObjectReady,
+						AttrsJSON: []byte(`{"id":"foo", "name": "bar", "value":"tacos", "nesting_map": [{"foo": "test"}]}`),
+					},
+					addrs.AbsProviderConfig{
+						Provider: rc.Provider,
+						Module:   addrs.RootModule,
+					},
+					addrs.NoKey,
+				)
+			}).SyncWrapper(),
+			rc,
 			cty.ObjectVal(map[string]cty.Value{
 				"id":    cty.StringVal("foo"),
 				"value": cty.StringVal("tacos"),
+				"name":  cty.StringVal("bar"),
 				"nesting_map": cty.SetVal([]cty.Value{
 					cty.ObjectVal(map[string]cty.Value{
 						// expected to have this attribute marked as sensitive but not as ephemeral
@@ -784,18 +805,17 @@ func TestEvaluatorGetResource_Ephemeral(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			// having these here for easier reference in the test body
 			state := tt.state
-			changes := tt.changes
 			want := tt.want
 
 			evaluator := &Evaluator{
 				Meta: &ContextMeta{
 					Env: "foo",
 				},
-				Changes: changes,
+				Changes: plans.NewChanges().SyncWrapper(),
 				Config: &configs.Config{
 					Module: &configs.Module{
 						EphemeralResources: map[string]*configs.Resource{
-							rc.Addr().String(): rc,
+							rc.Addr().String(): &tt.resCfg,
 						},
 					},
 				},

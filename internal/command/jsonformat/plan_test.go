@@ -8,12 +8,11 @@ package jsonformat
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/mitchellh/colorstring"
-	"github.com/zclconf/go-cty/cty"
-
 	"github.com/opentofu/opentofu/internal/addrs"
 	"github.com/opentofu/opentofu/internal/command/jsonformat/differ"
 	"github.com/opentofu/opentofu/internal/command/jsonformat/structured"
@@ -27,6 +26,7 @@ import (
 	"github.com/opentofu/opentofu/internal/states"
 	"github.com/opentofu/opentofu/internal/terminal"
 	"github.com/opentofu/opentofu/internal/tofu"
+	"github.com/zclconf/go-cty/cty"
 )
 
 func TestRenderHuman_EmptyPlan(t *testing.T) {
@@ -79,6 +79,36 @@ found no differences, so no changes are needed.
 	got := done(t).Stdout()
 	if diff := cmp.Diff(want, got); len(diff) > 0 {
 		t.Errorf("unexpected output\ngot:\n%s\nwant:\n%s\ndiff:\n%s", got, want, diff)
+	}
+}
+
+func TestRenderHuman_NoChanges_Targeted(t *testing.T) {
+	color := &colorstring.Colorize{Colors: colorstring.DefaultColors, Disable: true}
+	streams, done := terminal.StreamsForTesting(t)
+
+	plan := Plan{}
+
+	renderer := Renderer{Colorize: color, Streams: streams}
+	plan.renderHuman(renderer, plans.NormalMode, plans.NoChanges, plans.Targeted)
+
+	got := done(t).Stdout()
+	if !strings.Contains(got, "You used the -target option") {
+		t.Errorf("expected output to contain a -target hint when Targeted quality is set, got:\n%s", got)
+	}
+}
+
+func TestRenderHuman_NoChanges_NotTargeted(t *testing.T) {
+	color := &colorstring.Colorize{Colors: colorstring.DefaultColors, Disable: true}
+	streams, done := terminal.StreamsForTesting(t)
+
+	plan := Plan{}
+
+	renderer := Renderer{Colorize: color, Streams: streams}
+	plan.renderHuman(renderer, plans.NormalMode, plans.NoChanges)
+
+	got := done(t).Stdout()
+	if strings.Contains(got, "You used the -target option") {
+		t.Errorf("expected output to NOT contain a -target hint when Targeted quality is not set, got:\n%s", got)
 	}
 }
 
@@ -138,6 +168,109 @@ func TestRenderHuman_Imports(t *testing.T) {
 OpenTofu will perform the following actions:
 
   # test_resource.resource will be imported
+  # (imported from "1D5F5E9E-F2E5-401B-9ED5-692A215AC67E")
+    resource "test_resource" "resource" {
+        id    = "1D5F5E9E-F2E5-401B-9ED5-692A215AC67E"
+        value = "Hello, World!"
+    }
+
+Plan: 1 to import, 0 to add, 0 to change, 0 to destroy.
+`,
+		},
+		"simple_import_with_identity": {
+			plan: Plan{
+				ResourceChanges: []jsonplan.ResourceChange{
+					{
+						Address:      "test_resource.resource",
+						Mode:         "managed",
+						Type:         "test_resource",
+						Name:         "resource",
+						ProviderName: "test",
+						Change: jsonplan.Change{
+							Actions: []string{"no-op"},
+							Before: marshalJson(t, map[string]any{
+								"id":    "1D5F5E9E-F2E5-401B-9ED5-692A215AC67E",
+								"value": "Hello, World!",
+							}),
+							After: marshalJson(t, map[string]any{
+								"id":    "1D5F5E9E-F2E5-401B-9ED5-692A215AC67E",
+								"value": "Hello, World!",
+							}),
+							Importing: &jsonplan.Importing{
+								Identity: marshalJson(t, map[string]any{
+									"name": "my-resource",
+								}),
+							},
+						},
+					},
+				},
+			},
+			output: `
+OpenTofu will perform the following actions:
+
+  # test_resource.resource will be imported
+  # imported using resource identity: {
+  #   "name": "my-resource"
+  # }
+    resource "test_resource" "resource" {
+        id    = "1D5F5E9E-F2E5-401B-9ED5-692A215AC67E"
+        value = "Hello, World!"
+    }
+
+Plan: 1 to import, 0 to add, 0 to change, 0 to destroy.
+`,
+		},
+		"import_with_complex_identity": {
+			plan: Plan{
+				ResourceChanges: []jsonplan.ResourceChange{
+					{
+						Address:      "test_resource.resource",
+						Mode:         "managed",
+						Type:         "test_resource",
+						Name:         "resource",
+						ProviderName: "test",
+						Change: jsonplan.Change{
+							Actions: []string{"no-op"},
+							Before: marshalJson(t, map[string]any{
+								"id":    "1D5F5E9E-F2E5-401B-9ED5-692A215AC67E",
+								"value": "Hello, World!",
+							}),
+							After: marshalJson(t, map[string]any{
+								"id":    "1D5F5E9E-F2E5-401B-9ED5-692A215AC67E",
+								"value": "Hello, World!",
+							}),
+							Importing: &jsonplan.Importing{
+								// The identity here contains a map, slice, and nested properties
+								Identity: marshalJson(t, map[string]any{
+									"project_id": "my-project-123",
+									"region":     "us-east-1",
+									"tags": map[string]any{
+										"env":   "production",
+										"owner": "platform-team",
+									},
+									"scopes": []string{"read", "write"},
+								}),
+							},
+						},
+					},
+				},
+			},
+			output: `
+OpenTofu will perform the following actions:
+
+  # test_resource.resource will be imported
+  # imported using resource identity: {
+  #   "project_id": "my-project-123",
+  #   "region": "us-east-1",
+  #   "scopes": [
+  #     "read",
+  #     "write"
+  #   ],
+  #   "tags": {
+  #     "env": "production",
+  #     "owner": "platform-team"
+  #   }
+  # }
     resource "test_resource" "resource" {
         id    = "1D5F5E9E-F2E5-401B-9ED5-692A215AC67E"
         value = "Hello, World!"
@@ -181,6 +314,7 @@ OpenTofu will perform the following actions:
 
   # test_resource.resource will be imported
   # (config will be generated)
+  # (imported from "1D5F5E9E-F2E5-401B-9ED5-692A215AC67E")
     resource "test_resource" "resource" {
         id    = "1D5F5E9E-F2E5-401B-9ED5-692A215AC67E"
         value = "Hello, World!"
@@ -350,6 +484,53 @@ OpenTofu will perform the following actions:
 
   # test_resource.resource will be updated in-place
   # (will be imported first)
+  ~ resource "test_resource" "resource" {
+        id    = "1D5F5E9E-F2E5-401B-9ED5-692A215AC67E"
+      ~ value = "Hello, World!" -> "Hello, Universe!"
+    }
+
+Plan: 1 to import, 0 to add, 1 to change, 0 to destroy.
+`,
+		},
+		"import_and_update_with_identity": {
+			plan: Plan{
+				ResourceChanges: []jsonplan.ResourceChange{
+					{
+						Address:      "test_resource.resource",
+						Mode:         "managed",
+						Type:         "test_resource",
+						Name:         "resource",
+						ProviderName: "test",
+						Change: jsonplan.Change{
+							Actions: []string{"update"},
+							Before: marshalJson(t, map[string]interface{}{
+								"id":    "1D5F5E9E-F2E5-401B-9ED5-692A215AC67E",
+								"value": "Hello, World!",
+							}),
+							After: marshalJson(t, map[string]interface{}{
+								"id":    "1D5F5E9E-F2E5-401B-9ED5-692A215AC67E",
+								"value": "Hello, Universe!",
+							}),
+							Importing: &jsonplan.Importing{
+								Identity: marshalJson(t, map[string]interface{}{
+									"name": "my-resource-identity-name",
+								}),
+							},
+						},
+					},
+				},
+			},
+			output: `
+OpenTofu used the selected providers to generate the following execution
+plan. Resource actions are indicated with the following symbols:
+  ~ update in-place (current -> planned)
+
+OpenTofu will perform the following actions:
+
+  # test_resource.resource will be updated in-place
+  # imported using resource identity: {
+  #   "name": "my-resource-identity-name"
+  # }
   ~ resource "test_resource" "resource" {
         id    = "1D5F5E9E-F2E5-401B-9ED5-692A215AC67E"
       ~ value = "Hello, World!" -> "Hello, Universe!"
@@ -1068,22 +1249,6 @@ new line`),
         }
         # (2 unchanged attributes hidden)
     }`,
-		},
-		"open ephemeral": {
-			Action: plans.Open,
-			Mode:   addrs.EphemeralResourceMode,
-			Before: cty.ObjectVal(map[string]cty.Value{
-				"name": cty.StringVal("name"),
-			}),
-			After: cty.ObjectVal(map[string]cty.Value{
-				"name": cty.StringVal("name"),
-			}),
-			Schema: &configschema.Block{
-				Attributes: map[string]*configschema.Attribute{
-					"name": {Type: cty.String, Optional: true},
-				},
-			},
-			ExpectedOutput: ``,
 		},
 	}
 
@@ -3525,6 +3690,53 @@ func TestResourceChange_nestedList(t *testing.T) {
         # (1 unchanged block hidden)
     }`,
 		},
+		"in-place update - whole block unknown": {
+			Action: plans.Update,
+			Mode:   addrs.ManagedResourceMode,
+			Before: cty.ObjectVal(map[string]cty.Value{
+				"id":  cty.StringVal("i-02ae66f368e8518a9"),
+				"ami": cty.StringVal("ami-BEFORE"),
+				"disks": cty.ListVal([]cty.Value{
+					cty.ObjectVal(map[string]cty.Value{
+						"mount_point": cty.StringVal("/var/diska"),
+						"size":        cty.StringVal("50GB"),
+					}),
+				}),
+				"root_block_device": cty.ListVal([]cty.Value{
+					cty.ObjectVal(map[string]cty.Value{
+						"volume_type": cty.StringVal("gp2"),
+						"new_field":   cty.StringVal("new_value"),
+					}),
+				}),
+			}),
+			After: cty.ObjectVal(map[string]cty.Value{
+				"id":  cty.StringVal("i-02ae66f368e8518a9"),
+				"ami": cty.StringVal("ami-AFTER"),
+				"disks": cty.ListVal([]cty.Value{
+					cty.ObjectVal(map[string]cty.Value{
+						"mount_point": cty.StringVal("/var/diska"),
+						"size":        cty.StringVal("50GB"),
+					}),
+				}),
+				"root_block_device": cty.UnknownVal(cty.List(cty.Object(map[string]cty.Type{
+					"volume_type": cty.String,
+					"new_field":   cty.String,
+				}))),
+			}),
+			RequiredReplace: cty.NewPathSet(),
+			Schema:          testSchemaPlus(configschema.NestingList),
+			ExpectedOutput: `  # test_instance.example will be updated in-place
+  ~ resource "test_instance" "example" {
+      ~ ami   = "ami-BEFORE" -> "ami-AFTER"
+        id    = "i-02ae66f368e8518a9"
+        # (1 unchanged attribute hidden)
+
+      ~ root_block_device {
+          + new_field   = (known after apply)
+          + volume_type = (known after apply)
+        } -> (known after apply)
+    }`,
+		},
 	}
 	runTestCases(t, testCases)
 }
@@ -4040,6 +4252,53 @@ func TestResourceChange_nestedSet(t *testing.T) {
         # (1 unchanged block hidden)
     }`,
 		},
+		"in-place update - whole block unknown": {
+			Action: plans.Update,
+			Mode:   addrs.ManagedResourceMode,
+			Before: cty.ObjectVal(map[string]cty.Value{
+				"id":  cty.StringVal("i-02ae66f368e8518a9"),
+				"ami": cty.StringVal("ami-BEFORE"),
+				"disks": cty.SetVal([]cty.Value{
+					cty.ObjectVal(map[string]cty.Value{
+						"mount_point": cty.StringVal("/var/diska"),
+						"size":        cty.StringVal("50GB"),
+					}),
+				}),
+				"root_block_device": cty.SetVal([]cty.Value{
+					cty.ObjectVal(map[string]cty.Value{
+						"volume_type": cty.StringVal("gp2"),
+						"new_field":   cty.StringVal("new_value"),
+					}),
+				}),
+			}),
+			After: cty.ObjectVal(map[string]cty.Value{
+				"id":  cty.StringVal("i-02ae66f368e8518a9"),
+				"ami": cty.StringVal("ami-AFTER"),
+				"disks": cty.SetVal([]cty.Value{
+					cty.ObjectVal(map[string]cty.Value{
+						"mount_point": cty.StringVal("/var/diska"),
+						"size":        cty.StringVal("50GB"),
+					}),
+				}),
+				"root_block_device": cty.UnknownVal(cty.Set(cty.Object(map[string]cty.Type{
+					"volume_type": cty.String,
+					"new_field":   cty.String,
+				}))),
+			}),
+			RequiredReplace: cty.NewPathSet(),
+			Schema:          testSchemaPlus(configschema.NestingSet),
+			ExpectedOutput: `  # test_instance.example will be updated in-place
+  ~ resource "test_instance" "example" {
+      ~ ami   = "ami-BEFORE" -> "ami-AFTER"
+        id    = "i-02ae66f368e8518a9"
+        # (1 unchanged attribute hidden)
+
+      ~ root_block_device {
+          + new_field   = (known after apply)
+          + volume_type = (known after apply)
+        } -> (known after apply)
+    }`,
+		},
 	}
 	runTestCases(t, testCases)
 }
@@ -4456,7 +4715,8 @@ func TestResourceChange_nestedMap(t *testing.T) {
 			}),
 			AfterValMarks: []cty.PathValueMarks{
 				{
-					Path: cty.Path{cty.GetAttrStep{Name: "disks"},
+					Path: cty.Path{
+						cty.GetAttrStep{Name: "disks"},
 						cty.IndexStep{Key: cty.StringVal("disk_a")},
 						cty.GetAttrStep{Name: "mount_point"},
 					},
@@ -5062,6 +5322,53 @@ func TestResourceChange_nestedMap(t *testing.T) {
         # (2 unchanged blocks hidden)
     }`,
 		},
+		"in-place update - whole block unknown": {
+			Action: plans.Update,
+			Mode:   addrs.ManagedResourceMode,
+			Before: cty.ObjectVal(map[string]cty.Value{
+				"id":  cty.StringVal("i-02ae66f368e8518a9"),
+				"ami": cty.StringVal("ami-BEFORE"),
+				"disks": cty.MapVal(map[string]cty.Value{
+					"disk_one": cty.ObjectVal(map[string]cty.Value{
+						"mount_point": cty.StringVal("/var/diska"),
+						"size":        cty.StringVal("50GB"),
+					}),
+				}),
+				"root_block_device": cty.MapVal(map[string]cty.Value{
+					"a": cty.ObjectVal(map[string]cty.Value{
+						"volume_type": cty.StringVal("gp2"),
+						"new_field":   cty.StringVal("new_value"),
+					}),
+				}),
+			}),
+			After: cty.ObjectVal(map[string]cty.Value{
+				"id":  cty.StringVal("i-02ae66f368e8518a9"),
+				"ami": cty.StringVal("ami-AFTER"),
+				"disks": cty.MapVal(map[string]cty.Value{
+					"disk_one": cty.ObjectVal(map[string]cty.Value{
+						"mount_point": cty.StringVal("/var/diska"),
+						"size":        cty.StringVal("50GB"),
+					}),
+				}),
+				"root_block_device": cty.UnknownVal(cty.Map(cty.Object(map[string]cty.Type{
+					"volume_type": cty.String,
+					"new_field":   cty.String,
+				}))),
+			}),
+			RequiredReplace: cty.NewPathSet(),
+			Schema:          testSchemaPlus(configschema.NestingMap),
+			ExpectedOutput: `  # test_instance.example will be updated in-place
+  ~ resource "test_instance" "example" {
+      ~ ami   = "ami-BEFORE" -> "ami-AFTER"
+        id    = "i-02ae66f368e8518a9"
+        # (1 unchanged attribute hidden)
+
+      ~ root_block_device {
+          + new_field   = (known after apply)
+          + volume_type = (known after apply)
+        } -> (known after apply)
+    }`,
+		},
 	}
 	runTestCases(t, testCases)
 }
@@ -5393,6 +5700,47 @@ func TestResourceChange_nestedSingle(t *testing.T) {
         id   = "i-02ae66f368e8518a9"
 
         # (1 unchanged block hidden)
+    }`,
+		},
+		"in-place update - whole block unknown": {
+			Action: plans.Update,
+			Mode:   addrs.ManagedResourceMode,
+			Before: cty.ObjectVal(map[string]cty.Value{
+				"id":  cty.StringVal("i-02ae66f368e8518a9"),
+				"ami": cty.StringVal("ami-BEFORE"),
+				"disk": cty.ObjectVal(map[string]cty.Value{
+					"mount_point": cty.StringVal("/var/diska"),
+					"size":        cty.StringVal("50GB"),
+				}),
+				"root_block_device": cty.ObjectVal(map[string]cty.Value{
+					"volume_type": cty.StringVal("gp2"),
+					"new_field":   cty.StringVal("new_value"),
+				}),
+			}),
+			After: cty.ObjectVal(map[string]cty.Value{
+				"id":  cty.StringVal("i-02ae66f368e8518a9"),
+				"ami": cty.StringVal("ami-AFTER"),
+				"disk": cty.ObjectVal(map[string]cty.Value{
+					"mount_point": cty.StringVal("/var/diska"),
+					"size":        cty.StringVal("50GB"),
+				}),
+				"root_block_device": cty.UnknownVal(cty.Object(map[string]cty.Type{
+					"volume_type": cty.String,
+					"new_field":   cty.String,
+				})),
+			}),
+			RequiredReplace: cty.NewPathSet(),
+			Schema:          testSchemaPlus(configschema.NestingSingle),
+			ExpectedOutput: `  # test_instance.example will be updated in-place
+  ~ resource "test_instance" "example" {
+      ~ ami  = "ami-BEFORE" -> "ami-AFTER"
+        id   = "i-02ae66f368e8518a9"
+        # (1 unchanged attribute hidden)
+
+      ~ root_block_device {
+          ~ new_field   = "new_value" -> (known after apply)
+          ~ volume_type = "gp2" -> (known after apply)
+        } -> (known after apply)
     }`,
 		},
 	}
@@ -7542,7 +7890,7 @@ func outputChange(name string, before, after cty.Value, sensitive bool) *plans.O
 
 // A basic test schema using a configurable NestingMode for one (NestedType) attribute and one block
 func testSchema(nesting configschema.NestingMode) *configschema.Block {
-	var diskKey = "disks"
+	diskKey := "disks"
 	if nesting == configschema.NestingSingle {
 		diskKey = "disk"
 	}
@@ -7645,7 +7993,7 @@ func testSchemaMultipleBlocks(nesting configschema.NestingMode) *configschema.Bl
 
 // similar to testSchema with the addition of a "new_field" block
 func testSchemaPlus(nesting configschema.NestingMode) *configschema.Block {
-	var diskKey = "disks"
+	diskKey := "disks"
 	if nesting == configschema.NestingSingle {
 		diskKey = "disk"
 	}

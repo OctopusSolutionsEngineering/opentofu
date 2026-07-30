@@ -241,6 +241,21 @@ func prepareStateV4(sV4 *stateV4) (*File, tfdiags.Diagnostics) {
 				obj.Private = raw
 			}
 
+			// Read identity from state file
+			if isV4.Identity != nil {
+				identityJSON, err := json.Marshal(isV4.Identity)
+				if err != nil {
+					diags = diags.Append(tfdiags.Sourceless(
+						tfdiags.Error,
+						"Invalid resource identity in state",
+						fmt.Sprintf("Instance %s has an invalid identity: %s.", instAddr.Absolute(moduleAddr), err),
+					))
+				} else {
+					obj.IdentityJSON = identityJSON
+					obj.IdentitySchemaVersion = isV4.IdentitySchemaVersion
+				}
+			}
+
 			{
 				depsRaw := isV4.Dependencies
 				deps := make([]addrs.ConfigResource, 0, len(depsRaw))
@@ -253,6 +268,20 @@ func prepareStateV4(sV4 *stateV4) (*File, tfdiags.Diagnostics) {
 					deps = append(deps, addr.Config())
 				}
 				obj.Dependencies = deps
+			}
+
+			if depsRaw := isV4.DependsOn; len(depsRaw) > 0 {
+
+				deps := make([]addrs.AbsResourceInstance, 0, len(depsRaw))
+				for _, depRaw := range depsRaw {
+					addr, addrDiags := addrs.ParseAbsResourceInstanceStr(depRaw)
+					diags = diags.Append(addrDiags)
+					if addrDiags.HasErrors() {
+						continue
+					}
+					deps = append(deps, addr)
+				}
+				obj.DependsOn = deps
 			}
 
 			switch {
@@ -362,7 +391,7 @@ func prepareStateV4(sV4 *stateV4) (*File, tfdiags.Diagnostics) {
 	return file, diags
 }
 
-func writeStateV4(file *File, w io.Writer, enc encryption.StateEncryption) tfdiags.Diagnostics {
+func writeStateV4(file *File, w io.Writer, enc encryption.StateEncryption, indent bool) tfdiags.Diagnostics {
 	// Here we'll convert back from the "File" representation to our
 	// stateV4 struct representation and write that.
 	//
@@ -491,7 +520,13 @@ func writeStateV4(file *File, w io.Writer, enc encryption.StateEncryption) tfdia
 
 	sV4.normalize()
 
-	src, err := json.Marshal(sV4)
+	var src []byte
+	var err error
+	if indent {
+		src, err = json.MarshalIndent(sV4, "", "  ")
+	} else {
+		src, err = json.Marshal(sV4)
+	}
 	if err != nil {
 		// Shouldn't happen if we do our conversion to *stateV4 correctly above.
 		diags = diags.Append(tfdiags.Sourceless(
@@ -546,6 +581,11 @@ func appendInstanceObjectStateV4(rs *states.Resource, is *states.ResourceInstanc
 		deps[i] = depAddr.String()
 	}
 
+	depsOn := make([]string, len(obj.DependsOn))
+	for i, depAddr := range obj.DependsOn {
+		depsOn[i] = depAddr.String()
+	}
+
 	var rawKey interface{}
 	switch tk := key.(type) {
 	case addrs.IntKey:
@@ -567,6 +607,25 @@ func appendInstanceObjectStateV4(rs *states.Resource, is *states.ResourceInstanc
 		providerInstance = rs.ProviderConfig.InstanceString(is.ProviderKey)
 	}
 
+	// This is a guardrail added to ensure that no ephemeral value will ever get in this part of the system.
+	// Before, by configuring different configschema.Attribute (with WriteOnly=true) or configschema.Schema (with Ephemeral=true)
+	// we could have values ending up in here.
+	// This check was added proactively as a safety net for future development and was not added reactively to a found issue.
+	// Before this change, the only values that could have been marked as ephemeral and written into state were already
+	// nullified and unmarked (see usage of Block.RemoveEphemeralFromWriteOnly)
+	for _, mark := range obj.TransientPathValueMarks {
+		_, ok := mark.Marks[marks.Ephemeral]
+		if ok {
+			return nil, tfdiags.Diagnostics{
+				tfdiags.Sourceless(
+					tfdiags.Error,
+					"Ephemeral detected in state writing",
+					fmt.Sprintf("%q has an ephemeral value in %q. This is a bug in OpenTofu. Please report it", rs.Addr.String(), tfdiags.FormatCtyPath(mark.Path)),
+				),
+			}
+		}
+	}
+
 	// Extract paths from path value marks
 	var paths []cty.Path
 	for _, vm := range obj.AttrSensitivePaths {
@@ -576,6 +635,11 @@ func appendInstanceObjectStateV4(rs *states.Resource, is *states.ResourceInstanc
 	// Marshal paths to JSON
 	attributeSensitivePaths, pathsDiags := marshalPaths(paths)
 	diags = diags.Append(pathsDiags)
+
+	var identity json.RawMessage
+	if obj.IdentityJSON != nil {
+		identity = obj.IdentityJSON
+	}
 
 	return append(isV4s, instanceObjectStateV4{
 		IndexKey:                rawKey,
@@ -588,8 +652,11 @@ func appendInstanceObjectStateV4(rs *states.Resource, is *states.ResourceInstanc
 		AttributeSensitivePaths: attributeSensitivePaths,
 		PrivateRaw:              privateRaw,
 		Dependencies:            deps,
+		DependsOn:               depsOn,
 		CreateBeforeDestroy:     obj.CreateBeforeDestroy,
 		SkipDestroy:             obj.SkipDestroy,
+		Identity:                identity,
+		IdentitySchemaVersion:   obj.IdentitySchemaVersion,
 	}), diags
 }
 
@@ -805,9 +872,13 @@ type instanceObjectStateV4 struct {
 	PrivateRaw []byte `json:"private,omitempty"`
 
 	Dependencies []string `json:"dependencies,omitempty"`
+	DependsOn    []string `json:"depends_on,omitempty"`
 
 	CreateBeforeDestroy bool `json:"create_before_destroy,omitempty"`
 	SkipDestroy         bool `json:"skip_destroy,omitempty"`
+
+	Identity              json.RawMessage `json:"identity,omitempty"`
+	IdentitySchemaVersion *uint64         `json:"identity_schema_version,omitempty"`
 }
 
 type checkResultsV4 struct {

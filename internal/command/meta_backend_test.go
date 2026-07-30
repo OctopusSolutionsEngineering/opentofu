@@ -17,7 +17,6 @@ import (
 
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hcltest"
-	"github.com/mitchellh/cli"
 	"github.com/opentofu/opentofu/internal/command/arguments"
 	"github.com/opentofu/opentofu/internal/command/workdir"
 	"github.com/zclconf/go-cty/cty"
@@ -45,7 +44,7 @@ func TestMetaBackend_emptyDir(t *testing.T) {
 	t.Chdir(td)
 
 	// Get the backend
-	m := testMetaBackend(t, nil)
+	m := testMetaBackend(t)
 	b, diags := m.Backend(t.Context(), &BackendOpts{Init: true}, encryption.StateEncryptionDisabled())
 	if diags.HasErrors() {
 		t.Fatal(diags.Err())
@@ -115,7 +114,7 @@ func TestMetaBackend_emptyWithDefaultState(t *testing.T) {
 	}
 
 	// Get the backend
-	m := testMetaBackend(t, nil)
+	m := testMetaBackend(t)
 	b, diags := m.Backend(t.Context(), &BackendOpts{Init: true}, encryption.StateEncryptionDisabled())
 	if diags.HasErrors() {
 		t.Fatal(diags.Err())
@@ -183,8 +182,8 @@ func TestMetaBackend_emptyWithExplicitState(t *testing.T) {
 	}
 
 	// Setup the meta
-	m := testMetaBackend(t, nil)
-	m.statePath = statePath
+	m := testMetaBackend(t)
+	m.stateArgs.StatePath = statePath
 
 	// Get the backend
 	b, diags := m.Backend(t.Context(), &BackendOpts{Init: true}, encryption.StateEncryptionDisabled())
@@ -238,7 +237,7 @@ func TestMetaBackend_configureInterpolation(t *testing.T) {
 	t.Chdir(td)
 
 	// Setup the meta
-	m := testMetaBackend(t, nil)
+	m := testMetaBackend(t)
 
 	// Get the backend
 	_, err := m.Backend(t.Context(), &BackendOpts{Init: true}, encryption.StateEncryptionDisabled())
@@ -254,7 +253,7 @@ func TestMetaBackend_configureNew(t *testing.T) {
 	t.Chdir(td)
 
 	// Setup the meta
-	m := testMetaBackend(t, nil)
+	m := testMetaBackend(t)
 
 	// Get the backend
 	b, diags := m.Backend(t.Context(), &BackendOpts{Init: true}, encryption.StateEncryptionDisabled())
@@ -323,11 +322,11 @@ func TestMetaBackend_configureNewWithState(t *testing.T) {
 	defer testInteractiveInput(t, []string{"yes"})()
 
 	// Setup the meta
-	m := testMetaBackend(t, nil)
+	m := testMetaBackend(t)
 
 	// This combination should not require the extra -migrate-state flag, since
 	// there is no existing backend config
-	m.migrateState = false
+	m.backendArgs.MigrateState = false
 
 	// Get the backend
 	b, diags := m.Backend(t.Context(), &BackendOpts{Init: true}, encryption.StateEncryptionDisabled())
@@ -401,7 +400,7 @@ func TestMetaBackend_configureNewWithoutCopy(t *testing.T) {
 	}
 
 	// Setup the meta
-	m := testMetaBackend(t, nil)
+	m := testMetaBackend(t)
 	m.input = false
 
 	// init the backend
@@ -450,7 +449,7 @@ func TestMetaBackend_configureNewWithStateNoMigrate(t *testing.T) {
 	defer testInteractiveInput(t, []string{"no"})()
 
 	// Setup the meta
-	m := testMetaBackend(t, nil)
+	m := testMetaBackend(t)
 
 	// Get the backend
 	b, diags := m.Backend(t.Context(), &BackendOpts{Init: true}, encryption.StateEncryptionDisabled())
@@ -491,9 +490,9 @@ func TestMetaBackend_configureNewWithStateExisting(t *testing.T) {
 	t.Chdir(td)
 
 	// Setup the meta
-	m := testMetaBackend(t, nil)
+	m := testMetaBackend(t)
 	// suppress input
-	m.forceInitCopy = true
+	m.backendArgs.ForceInitCopy = true
 
 	// Get the backend
 	b, diags := m.Backend(t.Context(), &BackendOpts{Init: true}, encryption.StateEncryptionDisabled())
@@ -567,7 +566,7 @@ func TestMetaBackend_configureNewWithStateExistingNoMigrate(t *testing.T) {
 	defer testInteractiveInput(t, []string{"no"})()
 
 	// Setup the meta
-	m := testMetaBackend(t, nil)
+	m := testMetaBackend(t)
 
 	// Get the backend
 	b, diags := m.Backend(t.Context(), &BackendOpts{Init: true}, encryption.StateEncryptionDisabled())
@@ -634,7 +633,7 @@ func TestMetaBackend_configuredUnchanged(t *testing.T) {
 	t.Chdir(testFixturePath("backend-unchanged"))
 
 	// Setup the meta
-	m := testMetaBackend(t, nil)
+	m := testMetaBackend(t)
 
 	// Get the backend
 	b, diags := m.Backend(t.Context(), &BackendOpts{Init: true}, encryption.StateEncryptionDisabled())
@@ -742,12 +741,12 @@ func TestMetaBackend_configuredUnchangedWithStaticEvalVars(t *testing.T) {
 	)
 
 	// Setup the meta
-	m := testMetaBackend(t, nil)
+	m := testMetaBackend(t)
 	// testMetaBackend normally sets migrateState on, because most of the tests
 	// _want_ to perform migration, but for this one we're behaving as if the
 	// user hasn't set the -migrate-state option and thus it should be an error
 	// if state migration is required.
-	m.migrateState = false
+	m.backendArgs.MigrateState = false
 
 	// Get the backend
 	b, diags := m.Backend(
@@ -824,7 +823,7 @@ func TestMetaBackend_configuredChange(t *testing.T) {
 	defer testInteractiveInput(t, []string{"no"})()
 
 	// Setup the meta
-	m := testMetaBackend(t, nil)
+	m := testMetaBackend(t)
 
 	// Get the backend
 	b, diags := m.Backend(t.Context(), &BackendOpts{Init: true}, encryption.StateEncryptionDisabled())
@@ -906,13 +905,13 @@ func TestMetaBackend_reconfigureChange(t *testing.T) {
 	defer backendInit.Set("local-single", nil)
 
 	// Setup the meta
-	m := testMetaBackend(t, nil)
+	m := testMetaBackend(t)
 
 	// this should not ask for input
 	m.input = false
 
 	// cli flag -reconfigure
-	m.reconfigure = true
+	m.backendArgs.Reconfigure = true
 
 	// Get the backend
 	b, diags := m.Backend(t.Context(), &BackendOpts{Init: true}, encryption.StateEncryptionDisabled())
@@ -955,7 +954,7 @@ func TestMetaBackend_initSelectedWorkspaceDoesNotExist(t *testing.T) {
 	t.Chdir(td)
 
 	// Setup the meta
-	m := testMetaBackend(t, nil)
+	m := testMetaBackend(t)
 
 	defer testInputMap(t, map[string]string{
 		"select-workspace": "2",
@@ -988,7 +987,7 @@ func TestMetaBackend_initSelectedWorkspaceDoesNotExistAutoSelect(t *testing.T) {
 	t.Chdir(td)
 
 	// Setup the meta
-	m := testMetaBackend(t, nil)
+	m := testMetaBackend(t)
 
 	// this should not ask for input
 	m.input = false
@@ -1029,7 +1028,7 @@ func TestMetaBackend_initSelectedWorkspaceDoesNotExistInputFalse(t *testing.T) {
 	t.Chdir(td)
 
 	// Setup the meta
-	m := testMetaBackend(t, nil)
+	m := testMetaBackend(t)
 	m.input = false
 
 	// Get the backend
@@ -1052,7 +1051,7 @@ func TestMetaBackend_configuredChangeCopy(t *testing.T) {
 	defer testInteractiveInput(t, []string{"yes", "yes"})()
 
 	// Setup the meta
-	m := testMetaBackend(t, nil)
+	m := testMetaBackend(t)
 
 	// Get the backend
 	b, diags := m.Backend(t.Context(), &BackendOpts{Init: true}, encryption.StateEncryptionDisabled())
@@ -1105,7 +1104,7 @@ func TestMetaBackend_configuredChangeCopy_singleState(t *testing.T) {
 	})()
 
 	// Setup the meta
-	m := testMetaBackend(t, nil)
+	m := testMetaBackend(t)
 
 	// Get the backend
 	b, diags := m.Backend(t.Context(), &BackendOpts{Init: true}, encryption.StateEncryptionDisabled())
@@ -1159,7 +1158,7 @@ func TestMetaBackend_configuredChangeCopy_multiToSingleDefault(t *testing.T) {
 	})()
 
 	// Setup the meta
-	m := testMetaBackend(t, nil)
+	m := testMetaBackend(t)
 
 	// Get the backend
 	b, diags := m.Backend(t.Context(), &BackendOpts{Init: true}, encryption.StateEncryptionDisabled())
@@ -1213,7 +1212,7 @@ func TestMetaBackend_configuredChangeCopy_multiToSingle(t *testing.T) {
 	})()
 
 	// Setup the meta
-	m := testMetaBackend(t, nil)
+	m := testMetaBackend(t)
 
 	// Get the backend
 	b, diags := m.Backend(t.Context(), &BackendOpts{Init: true}, encryption.StateEncryptionDisabled())
@@ -1282,7 +1281,7 @@ func TestMetaBackend_configuredChangeCopy_multiToSingleCurrentEnv(t *testing.T) 
 	})()
 
 	// Setup the meta
-	m := testMetaBackend(t, nil)
+	m := testMetaBackend(t)
 
 	// Change env
 	if err := m.SetWorkspace("env2"); err != nil {
@@ -1342,7 +1341,7 @@ func TestMetaBackend_configuredChangeCopy_multiToMulti(t *testing.T) {
 	})()
 
 	// Setup the meta
-	m := testMetaBackend(t, nil)
+	m := testMetaBackend(t)
 
 	// Get the backend
 	b, diags := m.Backend(t.Context(), &BackendOpts{Init: true}, encryption.StateEncryptionDisabled())
@@ -1440,7 +1439,7 @@ func TestMetaBackend_configuredChangeCopy_multiToNoDefaultWithDefault(t *testing
 	})()
 
 	// Setup the meta
-	m := testMetaBackend(t, nil)
+	m := testMetaBackend(t)
 
 	// Get the backend
 	b, diags := m.Backend(t.Context(), &BackendOpts{Init: true}, encryption.StateEncryptionDisabled())
@@ -1514,7 +1513,7 @@ func TestMetaBackend_configuredChangeCopy_multiToNoDefaultWithoutDefault(t *test
 	})()
 
 	// Setup the meta
-	m := testMetaBackend(t, nil)
+	m := testMetaBackend(t)
 
 	// Get the backend
 	b, diags := m.Backend(t.Context(), &BackendOpts{Init: true}, encryption.StateEncryptionDisabled())
@@ -1580,7 +1579,7 @@ func TestMetaBackend_configuredUnset(t *testing.T) {
 	defer testInteractiveInput(t, []string{"no"})()
 
 	// Setup the meta
-	m := testMetaBackend(t, nil)
+	m := testMetaBackend(t)
 
 	// Get the backend
 	b, diags := m.Backend(t.Context(), &BackendOpts{Init: true}, encryption.StateEncryptionDisabled())
@@ -1644,7 +1643,7 @@ func TestMetaBackend_configuredUnsetCopy(t *testing.T) {
 	defer testInteractiveInput(t, []string{"yes", "yes"})()
 
 	// Setup the meta
-	m := testMetaBackend(t, nil)
+	m := testMetaBackend(t)
 
 	// Get the backend
 	b, diags := m.Backend(t.Context(), &BackendOpts{Init: true}, encryption.StateEncryptionDisabled())
@@ -1714,7 +1713,7 @@ func TestMetaBackend_planLocal(t *testing.T) {
 	}
 
 	// Setup the meta
-	m := testMetaBackend(t, nil)
+	m := testMetaBackend(t)
 
 	// Get the backend
 	b, diags := m.BackendForLocalPlan(t.Context(), backendConfig, encryption.StateEncryptionDisabled())
@@ -1816,8 +1815,8 @@ func TestMetaBackend_planLocalStatePath(t *testing.T) {
 	}
 
 	// Setup the meta
-	m := testMetaBackend(t, nil)
-	m.stateOutPath = statePath
+	m := testMetaBackend(t)
+	m.stateArgs.StateOutPath = statePath
 
 	// Get the backend
 	b, diags := m.BackendForLocalPlan(t.Context(), plannedBackend, encryption.StateEncryptionDisabled())
@@ -1908,7 +1907,7 @@ func TestMetaBackend_planLocalMatch(t *testing.T) {
 	}
 
 	// Setup the meta
-	m := testMetaBackend(t, nil)
+	m := testMetaBackend(t)
 
 	// Get the backend
 	b, diags := m.BackendForLocalPlan(t.Context(), backendConfig, encryption.StateEncryptionDisabled())
@@ -1983,7 +1982,7 @@ func TestMetaBackend_configureWithExtra(t *testing.T) {
 	t.Chdir(td)
 
 	extras := map[string]cty.Value{"path": cty.StringVal("hello")}
-	m := testMetaBackend(t, nil)
+	m := testMetaBackend(t)
 	opts := &BackendOpts{
 		ConfigOverride: configs.SynthBody("synth", extras),
 		Init:           true,
@@ -2010,7 +2009,7 @@ func TestMetaBackend_configureWithExtra(t *testing.T) {
 	}
 
 	// init the backend again with the same options
-	m = testMetaBackend(t, nil)
+	m = testMetaBackend(t)
 	_, err = m.Backend(t.Context(), &BackendOpts{
 		ConfigOverride: configs.SynthBody("synth", extras),
 		Init:           true,
@@ -2038,8 +2037,8 @@ func TestMetaBackend_localDoesNotDeleteLocal(t *testing.T) {
 	orig.Module(addrs.RootModuleInstance).SetOutputValue("foo", cty.StringVal("bar"), false, "")
 	testStateFileDefault(t, orig)
 
-	m := testMetaBackend(t, nil)
-	m.forceInitCopy = true
+	m := testMetaBackend(t)
+	m.backendArgs.ForceInitCopy = true
 	// init the backend
 	_, diags := m.Backend(t.Context(), &BackendOpts{Init: true}, encryption.StateEncryptionDisabled())
 	if diags.HasErrors() {
@@ -2061,7 +2060,7 @@ func TestMetaBackend_configToExtra(t *testing.T) {
 	t.Chdir(td)
 
 	// init the backend
-	m := testMetaBackend(t, nil)
+	m := testMetaBackend(t)
 	_, err := m.Backend(t.Context(), &BackendOpts{
 		Init: true,
 	}, encryption.StateEncryptionDisabled())
@@ -2081,8 +2080,8 @@ func TestMetaBackend_configToExtra(t *testing.T) {
 
 	// init the backend again with the  options
 	extras := map[string]cty.Value{"path": cty.StringVal("hello")}
-	m = testMetaBackend(t, nil)
-	m.forceInitCopy = true
+	m = testMetaBackend(t)
+	m.backendArgs.ForceInitCopy = true
 	_, diags := m.Backend(t.Context(), &BackendOpts{
 		ConfigOverride: configs.SynthBody("synth", extras),
 		Init:           true,
@@ -2104,7 +2103,7 @@ func TestBackendFromState(t *testing.T) {
 	t.Chdir(wd.RootModuleDir())
 
 	// Setup the meta
-	m := testMetaBackend(t, nil)
+	m := testMetaBackend(t)
 	m.WorkingDir = wd
 	// tofu caches a small "state" file that stores the backend config.
 	// This test must override m.dataDir so it loads the "terraform.tfstate" file in the
@@ -2123,20 +2122,19 @@ func TestBackendFromState(t *testing.T) {
 	}
 }
 
-func testMetaBackend(t *testing.T, args []string) *Meta {
-	var m Meta
-	m.Ui = new(cli.MockUi)
+func testMetaBackend(t *testing.T) *Meta {
 	view, _ := testView(t)
-	m.View = view
-	m.process(args)
-	f := m.extendedFlagSet("test")
-	if err := f.Parse(args); err != nil {
-		t.Fatalf("unexpected error: %s", err)
+	m := Meta{
+		WorkingDir: workdir.NewDir("."),
+		View:       view,
+		stateArgs:  arguments.State{Lock: true},
+		// metaBackend tests are verifying migrate actions
+		backendArgs: arguments.Backend{MigrateState: true},
 	}
 
-	// metaBackend tests are verifying migrate actions
-	m.migrateState = true
-	m.WorkingDir = workdir.NewDir(".")
+	// TODO meta-refactor: these assignments are needed because the extendedFlagSet was used here before,
+	//   which had these with defaults as "true". In a future iteration, once these are not needed, we need to remove them.
+	m.input = true
 
 	t.Cleanup(func() {
 		// Trigger garbage collection to ensure that all open file handles are closed.

@@ -6,7 +6,6 @@
 package command
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -19,7 +18,6 @@ import (
 	"github.com/opentofu/opentofu/internal/backend"
 	"github.com/opentofu/opentofu/internal/backend/remote"
 	"github.com/opentofu/opentofu/internal/cloud"
-	"github.com/opentofu/opentofu/internal/command/arguments"
 	"github.com/opentofu/opentofu/internal/command/clistate"
 	"github.com/opentofu/opentofu/internal/command/views"
 	"github.com/opentofu/opentofu/internal/encryption"
@@ -31,13 +29,20 @@ import (
 type backendMigrateOpts struct {
 	SourceType, DestinationType string
 	Source, Destination         backend.Backend
-	ViewOptions                 arguments.ViewOptions
+	View                        views.Backend
 
 	// Fields below are set internally when migrate is called
 
 	sourceWorkspace      string
 	destinationWorkspace string
 	force                bool // if true, won't ask for confirmation
+}
+
+func (b *backendMigrateOpts) backendView(base *views.View) views.Backend {
+	if b != nil && b.View != nil {
+		return b.View
+	}
+	return views.NewBackendHuman(base)
 }
 
 // backendMigrateState handles migrating (copying) state from one backend
@@ -72,7 +77,7 @@ func (m *Meta) backendMigrateState(ctx context.Context, opts *backendMigrateOpts
 	// Set up defaults
 	opts.sourceWorkspace = backend.DefaultStateName
 	opts.destinationWorkspace = backend.DefaultStateName
-	opts.force = m.forceInitCopy
+	opts.force = m.backendArgs.ForceInitCopy
 
 	// Disregard remote OpenTofu version for the state source backend. If it's a
 	// Terraform Cloud remote backend, we don't care about the remote version,
@@ -80,7 +85,7 @@ func (m *Meta) backendMigrateState(ctx context.Context, opts *backendMigrateOpts
 	m.ignoreRemoteVersionConflict(opts.Source)
 
 	// Disregard remote OpenTofu version if instructed to do so via CLI flag.
-	if m.ignoreRemoteVersion {
+	if m.backendArgs.IgnoreRemoteVersion {
 		m.ignoreRemoteVersionConflict(opts.Destination)
 	} else {
 		// Check the remote OpenTofu version for the state destination backend. If
@@ -146,7 +151,7 @@ func (m *Meta) backendMigrateState(ctx context.Context, opts *backendMigrateOpts
 	return nil
 }
 
-//-------------------------------------------------------------------
+// -------------------------------------------------------------------
 // State Migration Scenarios
 //
 // The functions below cover handling all the various scenarios that
@@ -160,7 +165,7 @@ func (m *Meta) backendMigrateState(ctx context.Context, opts *backendMigrateOpts
 // The suffix is used to disambiguate multiple cases with the same type of
 // states.
 //
-//-------------------------------------------------------------------
+// -------------------------------------------------------------------
 
 // Multi-state to multi-state.
 func (m *Meta) backendMigrateState_S_S(ctx context.Context, opts *backendMigrateOpts) error {
@@ -345,19 +350,10 @@ func (m *Meta) backendMigrateState_s_s(ctx context.Context, opts *backendMigrate
 		}
 	}
 
-	if m.stateLock {
+	if m.stateArgs.Lock {
 		lockCtx := context.Background()
-		// Set default viewtype if none was set as the StateLocker needs to know exactly
-		// what viewType we want to have.
-		viewOptions := arguments.ViewOptions{ViewType: arguments.ViewHuman}
-		if opts != nil {
-			viewOptions = opts.ViewOptions
-			if viewOptions.ViewType != arguments.ViewHuman && viewOptions.ViewType != arguments.ViewJSON {
-				viewOptions.ViewType = arguments.ViewHuman
-			}
-		}
-		view := views.NewStateLocker(viewOptions, m.View)
-		locker := clistate.NewLocker(m.stateLockTimeout, view)
+		view := opts.backendView(m.View).StateLocker()
+		locker := clistate.NewLocker(m.stateArgs.LockTimeout, view)
 
 		lockerSource := locker.WithContext(lockCtx)
 		if diags := lockerSource.Lock(sourceState, "migration source state"); diags.HasErrors() {
@@ -624,7 +620,7 @@ func (m *Meta) backendMigrateTFC(ctx context.Context, opts *backendMigrateOpts) 
 		if migrate, err := m.promptSingleToCloudSingleStateMigration(opts); err != nil {
 			return err
 		} else if !migrate {
-			return nil //skip migrating but return successfully
+			return nil // skip migrating but return successfully
 		}
 
 		return m.backendMigrateState_s_s(ctx, opts)
@@ -683,7 +679,7 @@ func (m *Meta) backendMigrateState_S_TFC(ctx context.Context, opts *backendMigra
 	// state we will not prompt the user for a new name because empty workspaces
 	// do not get migrated.
 	defaultNewName := map[string]string{}
-	for i := 0; i < len(sourceWorkspaces); i++ {
+	for i := range sourceWorkspaces {
 		if sourceWorkspaces[i] == backend.DefaultStateName {
 			// For the default workspace we want to look to see if there is any state
 			// before we ask for a workspace name to migrate the default workspace into.
@@ -790,18 +786,8 @@ func (m *Meta) backendMigrateState_S_TFC(ctx context.Context, opts *backendMigra
 		return err
 	}
 
-	m.Ui.Output(m.Colorize().Color("[reset][bold]Migration complete! Your workspaces are as follows:[reset]"))
-	var out bytes.Buffer
-	for _, name := range workspaces {
-		if name == newCurrentWorkspace {
-			out.WriteString("* ")
-		} else {
-			out.WriteString("  ")
-		}
-		out.WriteString(name + "\n")
-	}
-
-	m.Ui.Output(out.String())
+	view := opts.backendView(m.View)
+	view.MigrationCompleted(workspaces, newCurrentWorkspace)
 
 	return nil
 }

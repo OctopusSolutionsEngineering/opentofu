@@ -11,12 +11,14 @@ import (
 
 // Login represents the command-line arguments for the login command.
 type Login struct {
+	// Host represents the host that OpenTofu will try to login to
 	Host string
+
 	// ViewOptions specifies which view options to use
 	ViewOptions ViewOptions
-
-	// Vars holds and provides information for the flags related to variables that a user can give into the process
-	Vars *Vars
+	// Vars and State are the common extended flags
+	Vars  *Vars
+	State *State
 }
 
 // ParseLogin processes CLI arguments, returning a Login value, a closer function, and errors.
@@ -28,9 +30,12 @@ func ParseLogin(args []string) (*Login, func(), tfdiags.Diagnostics) {
 		// Even though the command does not use the -var/-var-file content, we will keep this for the moment
 		// just to keep backwards compatibility for users (in case any of them are using these flags with this command)
 		Vars: &Vars{},
+		// State is only initialised and no flags are registered since the login command needs to lock the
+		// state by default, with no user input on that.
+		State: &State{Lock: true},
 	}
 
-	cmdFlags := extendedFlagSet("login", nil, nil, arguments.Vars)
+	cmdFlags := extendedFlagSet("login", nil, arguments.Vars)
 	arguments.ViewOptions.AddFlags(cmdFlags, true)
 	if err := cmdFlags.Parse(args); err != nil {
 		diags = diags.Append(tfdiags.Sourceless(

@@ -16,7 +16,6 @@ import (
 	"github.com/zclconf/go-cty/cty"
 
 	"github.com/opentofu/opentofu/internal/backend"
-	"github.com/opentofu/opentofu/internal/command/arguments"
 	"github.com/opentofu/opentofu/internal/command/clistate"
 	"github.com/opentofu/opentofu/internal/command/views"
 	"github.com/opentofu/opentofu/internal/configs"
@@ -196,7 +195,8 @@ func TestRemoteContextWithVars(t *testing.T) {
 			}
 
 			streams, _ := terminal.StreamsForTesting(t)
-			view := views.NewStateLocker(arguments.ViewOptions{ViewType: arguments.ViewHuman}, views.NewView(streams))
+			backendView := views.NewBackendHuman(views.NewView(streams))
+			view := backendView.StateLocker()
 
 			op := &backend.Operation{
 				ConfigDir:    configDir,
@@ -215,7 +215,7 @@ func TestRemoteContextWithVars(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			_, _, diags := b.LocalRun(t.Context(), op)
+			_, _, diags := b.LocalRun(t.Context(), t.Context(), op)
 
 			if test.WantError != "" {
 				if !diags.HasErrors() {
@@ -421,7 +421,8 @@ func TestRemoteVariablesDoNotOverride(t *testing.T) {
 			}
 
 			streams, _ := terminal.StreamsForTesting(t)
-			view := views.NewStateLocker(arguments.ViewOptions{ViewType: arguments.ViewHuman}, views.NewView(streams))
+			backendView := views.NewBackendHuman(views.NewView(streams))
+			view := backendView.StateLocker()
 
 			op := &backend.Operation{
 				ConfigDir:    configDir,
@@ -438,7 +439,7 @@ func TestRemoteVariablesDoNotOverride(t *testing.T) {
 				}
 			}
 
-			lr, _, diags := b.LocalRun(t.Context(), op)
+			lr, _, diags := b.LocalRun(t.Context(), t.Context(), op)
 
 			if diags.HasErrors() {
 				t.Fatalf("unexpected error\ngot:  %s\nwant: <no error>", diags.Err().Error())

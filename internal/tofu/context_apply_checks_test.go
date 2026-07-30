@@ -749,6 +749,8 @@ check "error" {
 }
 
 func validateCheckDiagnostics(t *testing.T, stage string, expectedWarning, expectedError string, actual tfdiags.Diagnostics) bool {
+	SkipExperimental(t, ExperimentalFeatureChecks)
+
 	if expectedError != "" {
 		if !actual.HasErrors() {
 			t.Errorf("expected %s to error with \"%s\", but no errors were returned", stage, expectedError)
@@ -778,6 +780,7 @@ func validateCheckDiagnostics(t *testing.T, stage string, expectedWarning, expec
 }
 
 func validateCheckResults(t *testing.T, stage string, expected map[string]checksTestingStatus, actual *states.CheckResults) {
+	SkipExperimental(t, ExperimentalFeatureChecks)
 
 	// Just a quick sanity check that the plan or apply process didn't create
 	// some non-existent checks.

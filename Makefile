@@ -28,6 +28,17 @@ EXT := $(shell go env GOEXE)
 build:
 	go build -ldflags "-X main.version=$(shell git describe --tags --always --dirty)" -o tofu$(EXT) ./cmd/tofu
 
+# Experimental engine building
+.PHONY: build-experimental
+build-experimental:
+	TOFU_X_EXPERIMENTAL_RUNTIME=1 go build -ldflags "-X main.version=$(shell git describe --tags --always --dirty) -X main.experimentsAllowed=yes" -o tofu$(EXT) ./cmd/tofu
+
+# Experimental engine testing
+.PHONY: test-experimental
+test-experimental:
+# 	TOFU_X_EXPERIMENTAL_RUNTIME=1 go test -ldflags "-X main.experimentsAllowed=yes" -v ./...
+	TOFU_X_EXPERIMENTAL_RUNTIME=1 go test -v -ldflags "-X main.experimentsAllowed=yes" -v ./internal/tofu
+
 # generate runs `go generate` to build the dynamically generated
 # source files, except the protobuf stubs which are built instead with
 # "make protobuf".
@@ -62,6 +73,12 @@ license-check:
 	licensei header --debug
 	rm -rf vendor/
 	git diff --exit-code
+
+# This runs the copyright checks against the files in this repository.
+# This is the same script that is used also in the .github/workflows/checks.yml. If this or that configuration is ever changed,
+# be sure that the changes are reflected in both places.
+copyright:
+	curl -fsSL https://raw.githubusercontent.com/opentofu/scripts/main/sh/copyright_check.sh | bash -s -- "" "*.go *.proto" "*/.git* */vendor/* */node_modules/* */.workdir* */website/* */tfplugin*.proto"
 
 # Install dependencies
 deps: bin/licensei

@@ -136,6 +136,8 @@ func TestNodeModuleVariableReference_grandchild(t *testing.T) {
 }
 
 func TestNodeModuleVariableConstraints(t *testing.T) {
+	SkipExperimental(t, ExperimentalBugReferenceProvider)
+
 	// This is a little extra convoluted to poke at some edge cases that have cropped up in the past around
 	// evaluating dependent nodes between the plan -> apply and destroy cycle.
 	m := testModuleInline(t, map[string]string{
@@ -235,6 +237,7 @@ func TestNodeModuleVariableConstraints(t *testing.T) {
 		assertNoDiagnostics(t, diags)
 
 		for _, addr := range checkableObjects {
+			SkipExperimental(t, ExperimentalFeatureChecks)
 			result := plan.Checks.GetObjectResult(addr)
 			if result == nil {
 				t.Fatalf("no check result for %s in the plan", addr)
@@ -305,6 +308,7 @@ func TestNodeModuleVariableConstraints(t *testing.T) {
 		}
 
 		if !found {
+			SkipExperimental(t, ExperimentalChangeDiagWording)
 			t.Fatalf("missing expected error\nwant summary: %s\ngot: %s", wantSummary, diags.Err().Error())
 		}
 	})

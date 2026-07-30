@@ -53,11 +53,6 @@ func setupSkipTestState(t *testing.T, instances []skipStateInstance) *states.Sta
 			inst.attrsJSON = `{"id":"baz","type":"aws_instance"}`
 		}
 
-		instanceKey := inst.instanceKey
-		if instanceKey == nil {
-			instanceKey = addrs.NoKey
-		}
-
 		obj := &states.ResourceInstanceObjectSrc{
 			Status:      states.ObjectReady,
 			AttrsJSON:   []byte(inst.attrsJSON),
@@ -70,14 +65,14 @@ func setupSkipTestState(t *testing.T, instances []skipStateInstance) *states.Sta
 				states.DeposedKey(inst.deposedKey),
 				obj,
 				mustProviderConfig(`provider["registry.opentofu.org/hashicorp/aws"]`),
-				instanceKey,
+				addrs.NoKey,
 			)
 		} else {
 			root.SetResourceInstanceCurrent(
 				mustResourceInstanceAddr(inst.addr).Resource,
 				obj,
 				mustProviderConfig(`provider["registry.opentofu.org/hashicorp/aws"]`),
-				instanceKey,
+				addrs.NoKey,
 			)
 		}
 	}
@@ -148,6 +143,8 @@ func runSkipDestroyTestCase(t *testing.T, tc skipDestroyTestCase) {
 
 func verifySkipPlanChanges(t *testing.T, plan *plans.Plan, expected []skipExpectedChange) {
 	t.Helper()
+
+	SkipExperimental(t, ExperimentalFeatureSkipDestroy)
 
 	if len(expected) > 0 && len(plan.Changes.Resources) != len(expected) {
 		t.Fatalf("expected number %d changes, got %d", len(expected), len(plan.Changes.Resources))
@@ -246,6 +243,7 @@ func TestSkipDestroy_DestroyMode(t *testing.T) {
 }
 
 func TestSkipDestroy_DestroyMode_Deposed(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureDeposed)
 	tests := []skipDestroyTestCase{
 		{
 			// Deposed objects are a special case, since they correspond to old instances.
@@ -408,6 +406,7 @@ func TestSkipDestroy_DestroyMode_ErrorOnForgotten(t *testing.T) {
 // is still present in state.
 
 func TestSkipDestroy_Orphan(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureSkipDestroy, ExperimentalBugStateProvider)
 	tests := []skipDestroyTestCase{
 		{
 			// Resource aws_instance.foo has been removed from configuration and is only present in state
@@ -449,6 +448,7 @@ func TestSkipDestroy_Orphan(t *testing.T) {
 // TestSkipDestroy_Orphan_RemovedBlockOverrides tests that orphan resource's
 // SkipDestroy attribute in state should be overridden by removed block in config.
 func TestSkipDestroy_Orphan_RemovedBlockOverrides(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureSkipDestroy, ExperimentalBugStateProvider)
 	tc := skipDestroyTestCase{
 		name: "RemovedBlockOverridesStateFlag",
 		config: `
@@ -553,6 +553,7 @@ func TestSkipDestroy_Replace(t *testing.T) {
 // 4. Neither with attribute -> Delete
 // 5. Orphaned deposed instance with attribute -> Forget
 func TestSkipDestroy_Deposed(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureDeposed)
 	tests := []skipDestroyTestCase{
 		{
 			// Config has destroy=true (no attribute). Deposed instance having SkipDestroy=true in state.
@@ -682,6 +683,7 @@ func TestSkipDestroy_Deposed(t *testing.T) {
 // - When instances are removed/reduced state attribute protects instances even if config has destroy=true
 
 func TestSkipDestroy_Enabled_Toggle(t *testing.T) {
+	SkipExperimental(t, ExperimentalBugStateProvider)
 	tests := []skipDestroyTestCase{
 		{
 			// Resource exists in state with SkipDestroy=false, but config has enabled=false and destroy=false.
@@ -1261,6 +1263,8 @@ func TestSkipDestroy_ForEach(t *testing.T) {
 // 4. Resource destroy=false, Removed destroy=false -> Forget
 
 func TestSkipDestroy_RemovedBlock(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureRemoved)
+
 	tests := []skipDestroyTestCase{
 		{
 			// State SkipDestroy=true,
@@ -1355,6 +1359,8 @@ func TestSkipDestroy_RemovedBlock(t *testing.T) {
 // TestSkipDestroy_RemovedBlock_DeposedInstance tests removed block interactions with deposed instances.
 // Deposed instances follow the same rules as current instances for removed blocks.
 func TestSkipDestroy_RemovedBlock_DeposedInstance(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureRemoved, ExperimentalFeatureDeposed)
+
 	tests := []skipDestroyTestCase{
 		{
 			// Config: removed block with destroy=true, State: Deposed with SkipDestroy=true
@@ -1420,6 +1426,7 @@ func TestSkipDestroy_ConfigChange_UpdatesState(t *testing.T) {
 	plan, _ := ctx.Plan(t.Context(), m, state, DefaultPlanOpts)
 	appliedState, _ := ctx.Apply(t.Context(), plan, m, nil)
 
+	SkipExperimental(t, ExperimentalFeatureSkipDestroy)
 	if !appliedState.RootModule().Resources["aws_instance.foo"].Instance(addrs.NoKey).Current.SkipDestroy {
 		t.Fatal("SkipDestroy attribute not set initially")
 	}

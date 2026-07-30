@@ -23,6 +23,8 @@ import (
 )
 
 func TestContext2Input_provider(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureProviderInput)
+
 	m := testModule(t, "input-provider")
 
 	providerCfgSchema := configschema.Block{
@@ -140,6 +142,8 @@ func TestContext2Input_provider(t *testing.T) {
 }
 
 func TestContext2Input_providerMulti(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureProviderInput)
+
 	m := testModule(t, "input-provider-multi")
 
 	getProviderSchemaResponse := getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
@@ -238,6 +242,8 @@ func TestContext2Input_providerOnce(t *testing.T) {
 }
 
 func TestContext2Input_providerOnly(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureProviderInput)
+
 	input := new(MockUIInput)
 
 	m := testModule(t, "input-provider-vars")

@@ -19,6 +19,13 @@ import (
 	"github.com/zclconf/go-cty/cty"
 )
 
+// CompileProviderConfigRef represents the lookup of a local provider config within a given
+// "scope". This is a side channel given the legacy inheritence of providers between modules
+//
+// Each valuer returned is expected to evaluate to a value of a type
+// returned by [ProviderInstanceRefType].
+type CompileProviderConfigRef func(ctx context.Context, providerInstAddr addrs.LocalProviderConfig) exprs.Valuer
+
 type ProviderConfig struct {
 	// FIXME: The current form of AbsProviderConfig is weird and not quite
 	// right, because the "Abs" prefix is supposed to represent something
@@ -68,7 +75,17 @@ var _ exprs.Valuer = (*ProviderConfig)(nil)
 func (p *ProviderConfig) Instances(ctx context.Context) map[addrs.InstanceKey]*ProviderInstance {
 	// We ignore the diagnostics here because they will be returned by
 	// the Value method instead.
-	result, _ := p.decideInstances(ctx)
+	result, diags := p.decideInstances(ctx)
+	if diags.HasErrors() && result == nil {
+		// If decideInstances fails for grapheval-related reasons, such as a
+		// dependency cycle, then it won't produce any result at all. The
+		// errors from that would be collected by a concurrent
+		// [Resource.CheckAll] and so we just report no instances here to
+		// allow things to unwind and report that error.
+		// (If decideInstances returns nil without returning any errors then
+		// that's a bug in decideInstances that should be fixed there.)
+		return nil
+	}
 	return result.Instances
 }
 
@@ -86,6 +103,13 @@ func (p *ProviderConfig) StaticCheckTraversal(traversal hcl.Traversal) tfdiags.D
 // Value implements exprs.Valuer.
 func (p *ProviderConfig) Value(ctx context.Context) (cty.Value, tfdiags.Diagnostics) {
 	selection, diags := p.decideInstances(ctx)
+	if diags.HasErrors() && selection == nil {
+		// If decideInstances fails for grapheval-related reasons, such as a
+		// dependency cycle, then it won't produce any result at all, but we
+		// still want to let the diagnostics propagate upwards so that the
+		// error gets reported.
+		return exprs.AsEvalError(cty.DynamicVal), diags
+	}
 	return valueForInstances(ctx, selection), diags
 }
 

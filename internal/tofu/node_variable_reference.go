@@ -27,10 +27,6 @@ type nodeVariableReference struct {
 	Module addrs.Module
 	Config *configs.Variable
 	Expr   hcl.Expression // Used for diagnostics only
-
-	// VariableFromRemoteModule is indicating if this variable is coming from a module that is referenced from the root module
-	// in "local" or "remote" manner.
-	VariableFromRemoteModule bool
 }
 
 var (
@@ -73,8 +69,6 @@ func (n *nodeVariableReference) DynamicExpand(ctx EvalContext) (*Graph, error) {
 			Addr:   addr,
 			Config: n.Config,
 			Expr:   n.Expr,
-
-			VariableFromRemoteModule: n.VariableFromRemoteModule,
 		}
 		g.Add(o)
 	}
@@ -125,10 +119,6 @@ type nodeVariableReferenceInstance struct {
 	Addr   addrs.AbsInputVariableInstance
 	Config *configs.Variable // Config is the var in the config
 	Expr   hcl.Expression    // Used for diagnostics only
-
-	// VariableFromRemoteModule is indicating if this variable is coming from a module that is referenced from the root module
-	// in "local" or "remote" manner.
-	VariableFromRemoteModule bool
 }
 
 // Ensure that we are implementing all of the interfaces we think we are
@@ -158,6 +148,8 @@ func (n *nodeVariableReferenceInstance) Execute(ctx context.Context, evalCtx Eva
 	log.Printf("[TRACE] nodeVariableReferenceInstance: evaluating %s", n.Addr)
 	diags := evalVariableValidations(ctx, n.Addr, n.Config, n.Expr, evalCtx)
 
+	diags = diags.Append(evalVariableDeprecation(n.Addr, n.Config, n.Expr, evalCtx))
+
 	if op == walkValidate {
 		var filtered tfdiags.Diagnostics
 		// Validate may contain unknown values, we can ignore that until plan/apply
@@ -167,9 +159,6 @@ func (n *nodeVariableReferenceInstance) Execute(ctx context.Context, evalCtx Eva
 			}
 		}
 		return filtered
-	} else {
-		// do not run this during the "validate" phase to ensure that the diagnostics are not duplicated
-		diags = diags.Append(evalVariableDeprecation(n.Addr, n.Config, n.Expr, evalCtx, n.VariableFromRemoteModule))
 	}
 
 	return diags

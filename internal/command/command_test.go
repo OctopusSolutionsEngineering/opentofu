@@ -26,8 +26,8 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/mitchellh/cli"
 	"github.com/opentofu/opentofu/internal/command/arguments"
-
 	"github.com/opentofu/svchost"
 	"github.com/opentofu/svchost/disco"
 	"github.com/zclconf/go-cty/cty"
@@ -35,6 +35,7 @@ import (
 	"github.com/opentofu/opentofu/internal/addrs"
 	backendInit "github.com/opentofu/opentofu/internal/backend/init"
 	backendLocal "github.com/opentofu/opentofu/internal/backend/local"
+	"github.com/opentofu/opentofu/internal/command/clistate"
 	"github.com/opentofu/opentofu/internal/command/views"
 	"github.com/opentofu/opentofu/internal/command/workdir"
 	"github.com/opentofu/opentofu/internal/configs"
@@ -45,7 +46,6 @@ import (
 	"github.com/opentofu/opentofu/internal/encryption"
 	"github.com/opentofu/opentofu/internal/getproviders"
 	"github.com/opentofu/opentofu/internal/initwd"
-	legacy "github.com/opentofu/opentofu/internal/legacy/tofu"
 	_ "github.com/opentofu/opentofu/internal/logging"
 	"github.com/opentofu/opentofu/internal/plans"
 	"github.com/opentofu/opentofu/internal/plans/planfile"
@@ -155,7 +155,7 @@ func testModuleWithSnapshot(t *testing.T, name string) (*configs.Config, *config
 	t.Helper()
 
 	dir := filepath.Join(fixtureDir, name)
-	loader := configload.NewLoaderForTests(t)
+	loader := configload.NewLoaderForTests(t, false)
 
 	// Test modules usually do not refer to remote sources, and for local
 	// sources only this ultimately just records all of the module paths
@@ -302,7 +302,7 @@ func testState() *states.State {
 				// The weird whitespace here is reflective of how this would
 				// get written out in a real state file, due to the indentation
 				// of all of the containing wrapping objects and arrays.
-				AttrsJSON:    []byte(`{"id":"bar"}`),
+				AttrsJSON:    []byte("{\n            \"id\": \"bar\"\n          }"),
 				Status:       states.ObjectReady,
 				Dependencies: []addrs.ConfigResource{},
 			},
@@ -327,7 +327,7 @@ func writeStateForTesting(state *states.State, w io.Writer) error {
 		Lineage: "fake-for-testing",
 		State:   state,
 	}
-	return statefile.Write(sf, w, encryption.StateEncryptionDisabled())
+	return statefile.WriteIndent(sf, w, encryption.StateEncryptionDisabled())
 }
 
 // testStateMgrCurrentLineage returns the current lineage for the given state
@@ -451,7 +451,7 @@ func testStateFileWorkspaceDefault(t *testing.T, workspace string, s *states.Sta
 
 // testStateFileRemote writes the state out to the remote statefile
 // in the cwd. Use `testCwd` to change into a temp cwd.
-func testStateFileRemote(t *testing.T, s *legacy.State) string {
+func testStateFileRemote(t *testing.T, s *clistate.CLIState) string {
 	t.Helper()
 
 	path := filepath.Join(workdir.DefaultDataDir, arguments.DefaultStateFilename)
@@ -465,7 +465,7 @@ func testStateFileRemote(t *testing.T, s *legacy.State) string {
 	}
 	defer f.Close()
 
-	if err := legacy.WriteState(s, f); err != nil {
+	if err := clistate.WriteState(s, f); err != nil {
 		t.Fatalf("err: %s", err)
 	}
 
@@ -493,9 +493,9 @@ func testStateRead(t *testing.T, path string) *states.State {
 // testDataStateRead reads a "data state", which is a file format resembling
 // our state format v3 that is used only to track current backend settings.
 //
-// This old format still uses *legacy.State, but should be replaced with
-// a more specialized type in a later release.
-func testDataStateRead(t *testing.T, path string) *legacy.State {
+// This uses *clistate.CLIState which is the specialized type for
+// tracking backend configuration.
+func testDataStateRead(t *testing.T, path string) *clistate.CLIState {
 	t.Helper()
 
 	f, err := os.Open(path)
@@ -504,7 +504,7 @@ func testDataStateRead(t *testing.T, path string) *legacy.State {
 	}
 	defer f.Close()
 
-	s, err := legacy.ReadState(f)
+	s, err := clistate.ReadState(f, false)
 	if err != nil {
 		t.Fatalf("err: %s", err)
 	}
@@ -671,7 +671,7 @@ func testInputMap(t *testing.T, answers map[string]string) func() {
 // be returned about the backend configuration having changed and that
 // "tofu init" must be run, since the test backend config cache created
 // by this function contains the hash for an empty configuration.
-func testBackendState(t *testing.T, s *states.State, c int) (*legacy.State, *httptest.Server) {
+func testBackendState(t *testing.T, s *states.State, c int) (*clistate.CLIState, *httptest.Server) {
 	t.Helper()
 
 	var b64md5 string
@@ -715,8 +715,8 @@ func testBackendState(t *testing.T, s *states.State, c int) (*legacy.State, *htt
 	configSchema := b.ConfigSchema()
 	hash, _ := backendConfig.Hash(t.Context(), configSchema)
 
-	state := legacy.NewState()
-	state.Backend = &legacy.BackendState{
+	state := clistate.NewState()
+	state.Backend = &clistate.BackendState{
 		Type:      "http",
 		ConfigRaw: json.RawMessage(fmt.Sprintf(`{"address":%q}`, srv.URL)),
 		Hash:      uint64(hash),
@@ -726,12 +726,12 @@ func testBackendState(t *testing.T, s *states.State, c int) (*legacy.State, *htt
 }
 
 // testRemoteState is used to make a test HTTP server to return a given
-// state file that can be used for testing legacy remote state.
+// state file that can be used for testing remote backend state.
 //
-// The return values are a *legacy.State instance that should be written
+// The return values are a *clistate.CLIState instance that should be written
 // as the "data state" (really: backend state) and the server that the
 // returned data state refers to.
-func testRemoteState(t *testing.T, s *states.State, c int) (*legacy.State, *httptest.Server) {
+func testRemoteState(t *testing.T, s *states.State, c int) (*clistate.CLIState, *httptest.Server) {
 	t.Helper()
 
 	var b64md5 string
@@ -753,10 +753,10 @@ func testRemoteState(t *testing.T, s *states.State, c int) (*legacy.State, *http
 		}
 	}
 
-	retState := legacy.NewState()
+	retState := clistate.NewState()
 
 	srv := httptest.NewServer(http.HandlerFunc(cb))
-	b := &legacy.BackendState{
+	b := &clistate.BackendState{
 		Type: "http",
 	}
 	if err := b.SetConfig(cty.ObjectVal(map[string]cty.Value{
@@ -970,7 +970,7 @@ func testServices(t *testing.T) (services *disco.Disco, cleanup func()) {
 	server := httptest.NewServer(http.HandlerFunc(fakeRegistryHandler))
 
 	services = disco.New()
-	services.ForceHostServices(svchost.Hostname("registry.opentofu.org"), map[string]interface{}{
+	services.ForceHostServices(svchost.Hostname("registry.opentofu.org"), map[string]any{
 		"providers.v1": server.URL + "/providers/v1/",
 	})
 
@@ -1115,10 +1115,10 @@ func checkGoldenReference(t *testing.T, output *terminal.TestOutput, fixturePath
 	}
 
 	// Compare the rest of the lines against the golden reference
-	var gotLineMaps []map[string]interface{}
+	var gotLineMaps []map[string]any
 	for i, line := range gotLines[1:] {
 		index := i + 1
-		var gotMap map[string]interface{}
+		var gotMap map[string]any
 		if err := json.Unmarshal([]byte(line), &gotMap); err != nil {
 			t.Errorf("failed to unmarshal got line %d: %s\n%s", index, err, gotLines[index])
 		}
@@ -1130,10 +1130,10 @@ func checkGoldenReference(t *testing.T, output *terminal.TestOutput, fixturePath
 		gotLineMaps = append(gotLineMaps, gotMap)
 	}
 
-	var wantLineMaps []map[string]interface{}
+	var wantLineMaps []map[string]any
 	for i, line := range wantLines[1:] {
 		index := i + 1
-		var wantMap map[string]interface{}
+		var wantMap map[string]any
 		if err := json.Unmarshal([]byte(line), &wantMap); err != nil {
 			t.Errorf("failed to unmarshal want line %d: %s\n%s", index, err, gotLines[index])
 		}
@@ -1148,8 +1148,8 @@ func checkGoldenReference(t *testing.T, output *terminal.TestOutput, fixturePath
 	}
 }
 
-func deleteMapField(fieldMap map[string]interface{}, rootField, field string) map[string]interface{} {
-	rootMap, ok := fieldMap[rootField].(map[string]interface{})
+func deleteMapField(fieldMap map[string]any, rootField, field string) map[string]any {
+	rootMap, ok := fieldMap[rootField].(map[string]any)
 	if !ok {
 		return fieldMap
 	}
@@ -1225,4 +1225,108 @@ func testHangServer(t testing.TB) (server *httptest.Server, reqs <-chan *http.Re
 		server.Close()                  // stop accepting new requests and wait for existing ones to stop
 	})
 	return server, reqsCh
+}
+
+// TestVarsParsing checks that the -var/-var-file are parsed correctly and processed as expected.
+// This was wrote while doing the Meta removal refactor, before removing all the temporary
+// GatherVariables methods to ensure that the logic added to replace the removed method does
+// not alter the way variable related arguments are parsed.
+// Tested against commands with checkable outputs to validate that the right variable values reached the
+// execution context.
+func TestVarsParsing(t *testing.T) {
+	p := testProvider()
+	varArgs := []string{"-var", "snack=chips", "-var-file", "all.tfvars"}
+	t.Run("console", func(t *testing.T) {
+		td := t.TempDir()
+		testCopyDir(t, testFixturePath("variables"), td)
+		t.Chdir(td)
+		t.Cleanup(testStdinPipe(t, strings.NewReader("var.foo\nvar.snack\n")))
+		streams, done := terminal.StreamsForTesting(t)
+		c := &ConsoleCommand{
+			Meta: Meta{
+				WorkingDir:       workdir.NewDir("."),
+				testingOverrides: metaOverridesForProvider(p),
+				View:             views.NewView(streams),
+			},
+		}
+
+		args := append([]string{"-no-color", "-lock=false"}, varArgs...)
+		code := c.Run(args)
+		output := done(t)
+		if code != 0 {
+			t.Fatalf("bad: %d\n\n%s", code, output.Stderr())
+		}
+
+		actual := output.Stdout()
+		expected := `"from tfvars"
+"chips"
+`
+		if diff := cmp.Diff(expected, actual); diff != "" {
+			t.Errorf("variables parsed incorrectly (-want,+got):\n%s", diff)
+		}
+	})
+
+	cases := map[string]struct {
+		cmdBuilder      func(m Meta) cli.Command
+		expectedContent []string
+		confirmation    bool
+	}{
+		"plan": {
+			cmdBuilder: func(m Meta) cli.Command {
+				return &PlanCommand{m}
+			},
+		},
+		"apply": {
+			cmdBuilder: func(m Meta) cli.Command {
+				return &ApplyCommand{Meta: m}
+			},
+			confirmation: true,
+		},
+		"output": {
+			cmdBuilder: func(m Meta) cli.Command {
+				return &OutputCommand{m}
+			},
+		},
+		"show": {
+			cmdBuilder: func(m Meta) cli.Command {
+				return &ShowCommand{Meta: m}
+			},
+		},
+		"refresh": {
+			cmdBuilder: func(m Meta) cli.Command {
+				return &RefreshCommand{m}
+			},
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			td := t.TempDir()
+			testCopyDir(t, testFixturePath("variables"), td)
+			t.Chdir(td)
+			view, done := testView(t)
+			m := Meta{
+				WorkingDir:       workdir.NewDir("."),
+				testingOverrides: metaOverridesForProvider(p),
+				View:             view,
+			}
+			c := tc.cmdBuilder(m)
+
+			args := append([]string{"-no-color"}, varArgs...)
+			if tc.confirmation {
+				t.Cleanup(testInputMap(t, map[string]string{"approve": "yes"}))
+			}
+			code := c.Run(args)
+			output := done(t)
+			if code != 0 {
+				t.Fatalf("bad: %d\n\n%s", code, output.Stderr())
+			}
+
+			actual := output.Stdout()
+			for _, want := range tc.expectedContent {
+				if !strings.Contains(actual, want) {
+					t.Errorf("variables parsed incorrectly. Want %q to exist in the output, but it didn't\noutput:\n%s", want, actual)
+				}
+			}
+		})
+	}
 }

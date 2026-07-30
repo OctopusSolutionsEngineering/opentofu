@@ -11,6 +11,7 @@ import (
 	"github.com/zclconf/go-cty/cty"
 
 	"github.com/opentofu/opentofu/internal/addrs"
+	"github.com/opentofu/opentofu/internal/lang/eval/internal/configgraph"
 	"github.com/opentofu/opentofu/internal/lang/exprs"
 	"github.com/opentofu/opentofu/internal/tfdiags"
 )
@@ -87,7 +88,23 @@ type ModuleCall struct {
 	// normal values in the surface language too, but it's not obvious how
 	// to get there from our current language without splitting the ecosystem
 	// between old-style and new-style modules.)
-	ProvidersFromParent map[addrs.LocalProviderConfig]exprs.Valuer
+	ProvidersFromParent configgraph.CompileProviderConfigRef
+
+	// DependencyMarks are additional marks that should be applied to the
+	// configuration values of anything that interacts with systems outside of
+	// OpenTofu (currently: resource instances and provider instances) to
+	// represent "whole-module-call" dependencies.
+	//
+	// For example, package tofu2024 uses this to deal with the "depends_on"
+	// meta-argument in a "module" block, which behaves as if it is declaring
+	// additional explicit dependencies for every resource instance or provider
+	// instance declared inside the module.
+	//
+	// Although this could in theory allow arbitrary cty marks of any type,
+	// callers should include only marks that represent dependencies that must
+	// be taken into account during the apply phase or else the results are
+	// likely to be quite confusing.
+	DependencyMarks cty.ValueMarks
 
 	// AllowImpureFunctions controls whether to allow full use of a small
 	// number of functions that produce different results each time they are

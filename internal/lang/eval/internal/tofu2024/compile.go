@@ -9,11 +9,9 @@ import (
 	"context"
 	"iter"
 
-	"github.com/zclconf/go-cty/cty/function"
-
 	"github.com/opentofu/opentofu/internal/addrs"
 	"github.com/opentofu/opentofu/internal/configs"
-	"github.com/opentofu/opentofu/internal/lang"
+	"github.com/opentofu/opentofu/internal/getproviders"
 	"github.com/opentofu/opentofu/internal/lang/eval/internal/configgraph"
 	"github.com/opentofu/opentofu/internal/lang/exprs"
 	"github.com/opentofu/opentofu/internal/tfdiags"
@@ -84,7 +82,22 @@ func CompileModuleInstance(
 	// symbols and all of the available functions.
 	topScope := &moduleInstanceScope{
 		inst:          ret,
-		coreFunctions: compileCoreFunctions(ctx, call.AllowImpureFunctions, call.EvalContext.RootModuleDir),
+		coreFunctions: compileCoreFunctions(ctx, call.AllowImpureFunctions, call.EvalContext.RootModuleDir, call.EvalContext.PlanTimestamp),
+
+		// tofu attrs
+		applying:  call.EvalContext.Applying,
+		workspace: call.EvalContext.Workspace,
+
+		// path attrs
+		workingDir: call.EvalContext.OriginalWorkingDir,
+		rootDir:    call.EvalContext.RootModuleDir,
+		sourceDir:  module.SourceDir,
+	}
+
+	ret.providerRequirements = func(ctx context.Context) (getproviders.Requirements, *getproviders.ProvidersQualification, tfdiags.Diagnostics) {
+		fakeCfg := &configs.Config{Module: module}
+		reqs, quals, diags := fakeCfg.ProviderRequirements()
+		return reqs, quals, tfdiags.New(diags)
 	}
 
 	// We have some shims in here to deal with the unusual way the existing
@@ -93,18 +106,41 @@ func CompileModuleInstance(
 	// in future but we want to keep existing modules working for now.
 	ret.providerConfigNodes = compileModuleInstanceProviderConfigs(ctx,
 		module.ProviderConfigs,
-		allResourcesFromModule(module),
 		topScope,
 		module.ProviderRequirements.RequiredProviders,
 		call.CalleeAddr,
 		call.EvalContext.Providers,
-		call.EvaluationGlue.ValidateProviderConfig,
+		call.DependencyMarks,
 	)
-	providersSidechannel := compileModuleProvidersSidechannel(ctx, call.ProvidersFromParent, ret.providerConfigNodes)
+
+	providersFromParent := call.ProvidersFromParent
+	if providersFromParent == nil {
+		if !call.CalleeAddr.IsRoot() {
+			panic("OpenTofu Compilation Bug: Missing providers from parent in non-root module")
+		}
+		// Wrap providersFromParent to handle provider config refs that make it back to the root
+		// module without an explicitly declared provider. Store the providers discovered
+		// through followed references for later use.
+		providersFromParent, ret.missingProviders = compileProviderConfigRefMissingInRoot(
+			module.ProviderRequirements.RequiredProviders,
+			call.EvalContext.Providers,
+			call.DependencyMarks,
+		)
+	}
+	// Add all of our local providerConfigNodes to the provider ref chain.
+	providersSidechannel := compileProviderConfigRefModule(providersFromParent, ret.providerConfigNodes)
+
+	// Inject the provider functions into the scope now that we have the full provider
+	// compilation chain available.
+	topScope.providerFunctions = compileProviderFunctions(
+		module.ProviderRequirements.RequiredProviders,
+		providersSidechannel,
+		call.EvaluationGlue,
+	)
 
 	ret.inputVariableNodes = compileModuleInstanceInputVariables(ctx, module.Variables, call.InputValues, topScope, call.CalleeAddr, call.DeclRange)
 	ret.localValueNodes = compileModuleInstanceLocalValues(ctx, module.Locals, topScope, call.CalleeAddr)
-	ret.outputValueNodes = compileModuleInstanceOutputValues(ctx, module.Outputs, topScope, call.CalleeAddr)
+	ret.outputValueNodes = compileModuleInstanceOutputValues(ctx, module.Outputs, topScope, call.CalleeAddr, call.DependencyMarks)
 	ret.moduleCallNodes = compileModuleInstanceModuleCalls(ctx,
 		module.ModuleCalls,
 		topScope,
@@ -122,7 +158,9 @@ func CompileModuleInstance(
 		providersSidechannel,
 		call.CalleeAddr,
 		call.EvalContext.Providers,
+		call.EvalContext.Provisioners,
 		call.EvaluationGlue.ResourceInstanceValue,
+		call.DependencyMarks,
 	)
 
 	// Now that we've assembled all of the innards of the module instance,
@@ -163,17 +201,4 @@ func compileCheckRules(configs []*configs.CheckRule, evalScope exprs.Scope) iter
 			}
 		}
 	}
-}
-
-// compileCoreFunctions prepares the table of core functions for inclusion in
-// a module instance scope.
-func compileCoreFunctions(_ context.Context, allowImpureFuncs bool, baseDir string) map[string]function.Function {
-	// For now we just borrow the functions table setup from the previous
-	// system's concept of "scope".
-	oldScope := lang.Scope{
-		PureOnly: !allowImpureFuncs,
-		BaseDir:  baseDir,
-		// TODO: PlanTimestamp?
-	}
-	return oldScope.Functions()
 }

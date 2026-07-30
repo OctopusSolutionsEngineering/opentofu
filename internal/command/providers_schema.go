@@ -9,9 +9,12 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/mitchellh/cli"
 	"github.com/opentofu/opentofu/internal/backend"
 	"github.com/opentofu/opentofu/internal/command/arguments"
 	"github.com/opentofu/opentofu/internal/command/jsonprovider"
+	"github.com/opentofu/opentofu/internal/command/views"
+	"github.com/opentofu/opentofu/internal/configs/configload"
 	"github.com/opentofu/opentofu/internal/tfdiags"
 )
 
@@ -29,41 +32,38 @@ func (c *ProvidersSchemaCommand) Synopsis() string {
 	return "Show schemas for the providers used in the configuration"
 }
 
-func (c *ProvidersSchemaCommand) Run(args []string) int {
+func (c *ProvidersSchemaCommand) Run(rawArgs []string) int {
 	ctx := c.CommandContext()
 
-	args = c.Meta.process(args)
-	cmdFlags := c.Meta.defaultFlagSet("providers schema")
-	c.Meta.varFlagSet(cmdFlags)
-	var jsonOutput bool
-	cmdFlags.BoolVar(&jsonOutput, "json", false, "produce JSON output")
+	common, rawArgs := arguments.ParseView(rawArgs)
+	c.View.Configure(common)
 
-	cmdFlags.Usage = func() { c.Ui.Error(c.Help()) }
-	if err := cmdFlags.Parse(args); err != nil {
-		c.Ui.Error(fmt.Sprintf("Error parsing command-line flags: %s\n", err.Error()))
-		return 1
+	args, closer, diags := arguments.ParseProvidersSchema(rawArgs)
+	defer closer()
+
+	view := views.NewProvidersSchema(c.View)
+	if diags.HasErrors() {
+		view.Diagnostics(diags)
+		return cli.RunResultHelp
 	}
 
-	if !jsonOutput {
-		c.Ui.Error(
-			"The `tofu providers schema` command requires the `-json` flag.\n")
-		cmdFlags.Usage()
-		return 1
-	}
+	c.Meta.variableArgs = args.Vars.All()
 
 	// Check for user-supplied plugin path
 	var err error
 	if c.pluginPath, err = c.loadPluginPath(); err != nil {
-		c.Ui.Error(fmt.Sprintf("Error loading plugin path: %s", err))
+		view.Diagnostics(diags.Append(tfdiags.Sourceless(
+			tfdiags.Error,
+			"Plugins loading error",
+			fmt.Sprintf("Error loading plugin path: %s", err),
+		)))
 		return 1
 	}
-
-	var diags tfdiags.Diagnostics
 
 	enc, encDiags := c.Encryption(ctx)
 	diags = diags.Append(encDiags)
 	if encDiags.HasErrors() {
-		c.showDiagnostics(diags)
+		view.Diagnostics(diags)
 		return 1
 	}
 
@@ -71,15 +71,15 @@ func (c *ProvidersSchemaCommand) Run(args []string) int {
 	b, backendDiags := c.Backend(ctx, nil, enc.State())
 	diags = diags.Append(backendDiags)
 	if backendDiags.HasErrors() {
-		c.showDiagnostics(diags)
+		view.Diagnostics(diags)
 		return 1
 	}
 
 	// We require a local backend
 	local, ok := b.(backend.Local)
 	if !ok {
-		c.showDiagnostics(diags) // in case of any warnings in here
-		c.Ui.Error(ErrUnsupportedLocalOp)
+		view.Diagnostics(diags) // in case of any warnings in here
+		view.UnsupportedLocalOp()
 		return 1
 	}
 
@@ -89,50 +89,61 @@ func (c *ProvidersSchemaCommand) Run(args []string) int {
 	// we expect that the config dir is the cwd
 	cwd, err := os.Getwd()
 	if err != nil {
-		c.Ui.Error(fmt.Sprintf("Error getting cwd: %s", err))
+		view.Diagnostics(diags.Append(tfdiags.Sourceless(
+			tfdiags.Error,
+			"Error getting cwd",
+			err.Error(),
+		)))
 		return 1
 	}
 
 	// Build the operation
-	opReq := c.Operation(ctx, b, arguments.ViewOptions{ViewType: arguments.ViewJSON}, enc)
+	opReq := c.Operation(ctx, b, view.Backend(), enc)
 	opReq.ConfigDir = cwd
-	opReq.ConfigLoader, err = c.initConfigLoader()
+	opReq.ConfigLoader, err = configload.Initialise(c.configLoader())
 	var callDiags tfdiags.Diagnostics
 	opReq.RootCall, callDiags = c.rootModuleCall(ctx, opReq.ConfigDir)
 	diags = diags.Append(callDiags)
 	if callDiags.HasErrors() {
-		c.showDiagnostics(diags)
+		view.Diagnostics(diags)
 		return 1
 	}
 
 	opReq.AllowUnsetVariables = true
 	if err != nil {
 		diags = diags.Append(err)
-		c.showDiagnostics(diags)
+		view.Diagnostics(diags)
 		return 1
 	}
 
 	// Get the context
-	lr, _, ctxDiags := local.LocalRun(ctx, opReq)
+	stopCtx, cancel := c.InterruptibleContext(ctx)
+	defer cancel()
+	lr, _, ctxDiags := local.LocalRun(ctx, stopCtx, opReq)
 	diags = diags.Append(ctxDiags)
 	if ctxDiags.HasErrors() {
-		c.showDiagnostics(diags)
+		view.Diagnostics(diags)
 		return 1
 	}
 
 	schemas, moreDiags := lr.Core.Schemas(ctx, lr.Config, lr.InputState)
 	diags = diags.Append(moreDiags)
 	if moreDiags.HasErrors() {
-		c.showDiagnostics(diags)
+		view.Diagnostics(diags)
 		return 1
 	}
 
 	jsonSchemas, err := jsonprovider.Marshal(schemas)
 	if err != nil {
-		c.Ui.Error(fmt.Sprintf("Failed to marshal provider schemas to json: %s", err))
+		view.Diagnostics(diags.Append(tfdiags.Sourceless(
+			tfdiags.Error,
+			"Failed to marshal provider schemas to json",
+			err.Error(),
+		)))
 		return 1
 	}
-	c.Ui.Output(string(jsonSchemas))
+
+	view.Output(string(jsonSchemas))
 
 	return 0
 }

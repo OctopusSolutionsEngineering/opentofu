@@ -7,6 +7,7 @@ package views
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -15,7 +16,6 @@ import (
 	"github.com/opentofu/opentofu/internal/command/arguments"
 	"github.com/opentofu/opentofu/internal/terminal"
 	"github.com/opentofu/opentofu/internal/tfdiags"
-	"github.com/opentofu/opentofu/internal/tofu"
 )
 
 // TestNewView it's just a sanity check to be sure that we have it initialized as expected.
@@ -31,12 +31,6 @@ func TestNewView(t *testing.T) {
 	}
 	if !view.colorize.Disable {
 		t.Error("expected colorize to be disabled by default")
-	}
-	if view.errorColor != "[red]" {
-		t.Errorf("expected errorColor to be [red], got %s", view.errorColor)
-	}
-	if view.warnColor != "[yellow]" {
-		t.Errorf("expected warnColor to be [yellow], got %s", view.warnColor)
 	}
 	if view.configSources == nil {
 		t.Error("expected configSources to be initialized")
@@ -126,10 +120,10 @@ func TestView_Configure(t *testing.T) {
 		"module deprecation warning level": {
 
 			viewArgs: &arguments.View{
-				ModuleDeprecationWarnLvl: tofu.DeprecationWarningLevelLocal,
+				ModuleDeprecationWarnLvl: arguments.DeprecationWarningLevelLocal,
 			},
 			validate: func(t *testing.T, v *View) {
-				if v.ModuleDeprecationWarnLvl != tofu.DeprecationWarningLevelLocal {
+				if v.ModuleDeprecationWarnLvl != arguments.DeprecationWarningLevelLocal {
 					t.Errorf("expected ModuleDeprecationWarnLvl to be Local, got %v", v.ModuleDeprecationWarnLvl)
 				}
 			},
@@ -441,111 +435,62 @@ func TestView_HelpPrompt(t *testing.T) {
 	}
 }
 
-func TestView_errorln(t *testing.T) {
-	testCases := map[string]struct {
-		message  string
-		noColor  bool
-		validate func(*testing.T, string)
-	}{
-		"simple error message": {
-			message: "This is an error",
-			noColor: true,
-			validate: func(t *testing.T, output string) {
-				if !strings.Contains(output, "This is an error") {
-					t.Errorf("expected error message in output, got %q", output)
-				}
-				if !strings.HasSuffix(output, "\n") {
-					t.Error("expected output to end with newline")
-				}
-			},
-		},
-		"error with color disabled": {
-			message: "Colored error",
-			noColor: true,
-			validate: func(t *testing.T, output string) {
-				if !strings.Contains(output, "Colored error") {
-					t.Errorf("expected error message in output, got %q", output)
-				}
-			},
-		},
-		"error with color enabled": {
-			message: "Colored error",
-			noColor: false,
-			validate: func(t *testing.T, output string) {
-				expected := "\x1b[31mColored error\x1b[0m\n"
-				if diff := cmp.Diff(expected, output); diff != "" {
-					t.Errorf("got unexpected message (-want, +got):\n%s", diff)
-				}
-			},
-		},
-	}
+// TestViewColorize was moved from meta_test and renamed from TestMetaColorize.
+// This was moved as is to keep the same testing patterns but in the context of the
+// views package.
+func TestViewColorize(t *testing.T) {
+	t.Run("with color enabled", func(t *testing.T) {
+		view, done := testView(t)
+		defer done(t)
 
-	for name, tc := range testCases {
-		t.Run(name, func(t *testing.T) {
-			streams, done := terminal.StreamsForTesting(t)
-			view := NewView(streams)
-			view.colorize.Disable = tc.noColor
+		args := []string{"foo", "bar"}
+		wantArgs := []string{"foo", "bar"}
+		viewArgs, args := arguments.ParseView(args)
 
-			view.errorln(tc.message)
-			output := done(t)
+		view.Configure(viewArgs)
 
-			stderr := output.Stderr()
-			tc.validate(t, stderr)
-		})
-	}
-}
+		if !reflect.DeepEqual(args, wantArgs) {
+			t.Fatalf("bad: %#v", args)
+		}
+		if view.Colorize().Disable {
+			t.Fatal("should not be disabled")
+		}
+	})
 
-func TestView_warnln(t *testing.T) {
-	testCases := map[string]struct {
-		message  string
-		noColor  bool
-		validate func(*testing.T, string)
-	}{
-		"simple warning message": {
-			message: "This is a warning",
-			noColor: true,
-			validate: func(t *testing.T, output string) {
-				if !strings.Contains(output, "This is a warning") {
-					t.Errorf("expected warning message in output, got %q", output)
-				}
-				if !strings.HasSuffix(output, "\n") {
-					t.Error("expected output to end with newline")
-				}
-			},
-		},
-		"warning with color disabled": {
-			message: "Colored warning",
-			noColor: true,
-			validate: func(t *testing.T, output string) {
-				if !strings.Contains(output, "Colored warning") {
-					t.Errorf("expected warning message in output, got %q", output)
-				}
-			},
-		},
-		"warning with color enabled": {
-			message: "Colored warning",
-			noColor: false,
-			validate: func(t *testing.T, output string) {
-				expected := "\x1b[33mColored warning\x1b[0m\n"
-				if diff := cmp.Diff(expected, output); diff != "" {
-					t.Errorf("got unexpected message (-want, +got):\n%s", diff)
-				}
-			},
-		},
-	}
+	t.Run("one occurrence of -no-color flag", func(t *testing.T) {
+		view, done := testView(t)
+		defer done(t)
 
-	for name, tc := range testCases {
-		t.Run(name, func(t *testing.T) {
-			streams, done := terminal.StreamsForTesting(t)
-			view := NewView(streams)
-			view.colorize.Disable = tc.noColor
+		args := []string{"foo", "-no-color", "bar"}
+		args2 := []string{"foo", "bar"}
+		viewArgs, args := arguments.ParseView(args)
 
-			view.warnln(tc.message)
-			output := done(t)
+		view.Configure(viewArgs)
+		if !reflect.DeepEqual(args, args2) {
+			t.Fatalf("bad: %#v", args)
+		}
+		if !view.Colorize().Disable {
+			t.Fatal("should be disabled")
+		}
+	})
 
-			// Warnings go to stdout
-			stdout := output.Stdout()
-			tc.validate(t, stdout)
-		})
-	}
+	t.Run("one occurrences of -no-color flag", func(t *testing.T) {
+		view, done := testView(t)
+		defer done(t)
+		// Test disable #2
+		// Verify multiple -no-color options are removed from args slice.
+		// E.g. an additional -no-color arg could be added by TF_CLI_ARGS.
+		args := []string{"foo", "-no-color", "bar", "-no-color"}
+		args2 := []string{"foo", "bar"}
+		viewArgs, args := arguments.ParseView(args)
+
+		view.Configure(viewArgs)
+
+		if !reflect.DeepEqual(args, args2) {
+			t.Fatalf("bad: %#v", args)
+		}
+		if !view.Colorize().Disable {
+			t.Fatal("should be disabled")
+		}
+	})
 }

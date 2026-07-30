@@ -303,6 +303,11 @@ func HashesMatchingPackage(loc PackageLocation, toTest []Hash) iter.Seq2[Hash, e
 // format. If PreferredHash returns a non-empty string then it will be one
 // of the hash strings in "given", and that hash is the one that must pass
 // verification in order for a package to be considered valid.
+//
+// In practice, this function is used in a variety of locations with a broader
+// goal in mind. It is used to filter out any hashes that OpenTofu does not
+// currently recognise. If this function is ever heavily modified, all call
+// sites should be checked carefully.
 func PreferredHashes(given []Hash) []Hash {
 	// For now this is just filtering for the two hash formats we support,
 	// both of which are considered equally "preferred". If we introduce
@@ -365,6 +370,10 @@ func PackageHashLegacyZipSHA(loc PackageLocalArchive) (Hash, error) {
 func HashLegacyZipSHAFromSHA(sum [sha256.Size]byte) Hash {
 	return HashSchemeZip.New(fmt.Sprintf("%x", sum[:]))
 }
+
+// emptyPackageHashV1 is the representation of a completely empty package using
+// the V1 hashing scheme.
+const emptyPackageHashV1 = Hash("h1:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=")
 
 // PackageHashV1 computes a hash of the contents of the package at the given
 // location using hash algorithm 1. The resulting Hash is guaranteed to have
@@ -526,9 +535,14 @@ type HashDisposition struct {
 	// unless the provider developer's signing key also appears in
 	// SignedByGPGKeyIDs.
 	VerifiedLocally bool
+
+	ReportedByTrustedMirror bool
+
+	// Optional, used for filtering
+	Platform *Platform
 }
 
-// SignedByAnyGPGKeys returns true if the reciever has at least one GPG key
+// SignedByAnyGPGKeys returns true if the receiver has at least one GPG key
 // ID that signed an assertion that the associated hash is valid for the
 // associated provider version.
 //
@@ -574,7 +588,17 @@ func MergeHashDisposition(a, b *HashDisposition) *HashDisposition {
 		}
 	}
 	ret.ReportedByRegistry = a.ReportedByRegistry || b.ReportedByRegistry
+	ret.ReportedByTrustedMirror = a.ReportedByTrustedMirror || b.ReportedByTrustedMirror
 	ret.VerifiedLocally = a.VerifiedLocally || b.VerifiedLocally
+	if a.Platform != nil {
+		ret.Platform = a.Platform
+	}
+	if b.Platform != nil {
+		if ret.Platform != nil && *ret.Platform != *b.Platform {
+			panic(fmt.Sprintf("BUG: conflicting platforms (%q != %q)", ret.Platform.String(), b.Platform.String()))
+		}
+		ret.Platform = b.Platform
+	}
 	return ret
 }
 
@@ -620,6 +644,15 @@ func (ds HashDispositions) HasAnyReportedByRegistry() bool {
 	return false
 }
 
+func (ds HashDispositions) HasAnyReportedByTrustedMirror() bool {
+	for _, disp := range ds {
+		if disp.ReportedByTrustedMirror {
+			return true
+		}
+	}
+	return false
+}
+
 func (ds HashDispositions) HasAnySignedByGPGKeys() bool {
 	for _, disp := range ds {
 		if disp.SignedByAnyGPGKeys() {
@@ -629,11 +662,11 @@ func (ds HashDispositions) HasAnySignedByGPGKeys() bool {
 	return false
 }
 
-// Merge modifies the receiever to also include all of the hashes and
+// Merge modifies the receiver to also include all of the hashes and
 // associated dispositions from the given other [HashDispositions] object.
 //
 // If both collections contain the same hash then their dispositions are
-// also merged, so that the reciever is left representing the union
+// also merged, so that the receiver is left representing the union
 // of the disposition information from both collections.
 func (ds HashDispositions) Merge(other HashDispositions) {
 	for hash, disp := range other {

@@ -66,14 +66,11 @@ type ModuleCallInstance struct {
 	// are no cycles in the dependency chain within the module.
 	InputsValuer *OnceValuer
 
-	// ProvidersFromParentValuers is our representation of the weird
+	// ProvidersFromParent is our representation of the weird
 	// "side-channel" that allows providers to pass between modules, which
 	// is separate from the concept of input variables despite being
 	// conceptually similar.
-	//
-	// Each valuer in this map is expected to evaluate to a value of a type
-	// returned by [ProviderInstanceRefType].
-	ProvidersFromParentValuers map[addrs.LocalProviderConfig]*OnceValuer
+	ProvidersFromParent CompileProviderConfigRef
 
 	validatedInputs grapheval.Once[cty.Value]
 }
@@ -121,24 +118,6 @@ func (m *ModuleCallInstance) InputsValue(ctx context.Context) (cty.Value, tfdiag
 	})
 }
 
-func (m *ModuleCallInstance) ProvidersFromParent(ctx context.Context) map[addrs.LocalProviderConfig]exprs.Valuer {
-	// We want to return a map of the interface type exprs.Valuer here, to
-	// avoid exposing the implementation detail that we're using OnceValuer
-	// internally, but unfortunately that means we need to copy our source
-	// map on each call. :(
-	// In practice that doesn't hurt too much since the main caller of this
-	// method is behind a "Once" anyway, so the result of this should get
-	// memoized further up the call stack.
-	if len(m.ProvidersFromParentValuers) == 0 {
-		return nil
-	}
-	ret := make(map[addrs.LocalProviderConfig]exprs.Valuer, len(m.ProvidersFromParentValuers))
-	for addr, valuer := range m.ProvidersFromParentValuers {
-		ret[addr] = exprs.Valuer(valuer)
-	}
-	return ret
-}
-
 // Value implements exprs.Valuer.
 func (m *ModuleCallInstance) Value(ctx context.Context) (cty.Value, tfdiags.Diagnostics) {
 	// The actual result value is decided by our caller, which is expected
@@ -169,9 +148,9 @@ func (m *ModuleCallInstance) ValueSourceRange() *tfdiags.SourceRange {
 }
 
 // CheckAll implements allChecker.
-func (c *ModuleCallInstance) CheckAll(ctx context.Context) tfdiags.Diagnostics {
+func (m *ModuleCallInstance) CheckAll(ctx context.Context) tfdiags.Diagnostics {
 	var cg CheckGroup
-	cg.CheckValuer(ctx, c)
+	cg.CheckValuer(ctx, m)
 	return cg.Complete(ctx)
 }
 

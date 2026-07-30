@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	"github.com/opentofu/opentofu/internal/command/arguments"
-	"github.com/opentofu/opentofu/internal/command/flags"
 	"github.com/opentofu/opentofu/internal/command/views"
 	"github.com/opentofu/opentofu/internal/encryption"
 	"github.com/opentofu/opentofu/internal/states"
@@ -44,7 +43,7 @@ func (c *OutputCommand) Run(rawArgs []string) int {
 	view := views.NewOutput(args.ViewOptions, c.View)
 
 	// Inject variables from args into meta for static evaluation
-	c.GatherVariables(args.Vars)
+	c.Meta.variableArgs = args.Vars.All()
 
 	// Load the encryption configuration
 	enc, encDiags := c.Encryption(ctx)
@@ -55,7 +54,7 @@ func (c *OutputCommand) Run(rawArgs []string) int {
 	}
 
 	// Fetch data from state
-	outputs, diags := c.Outputs(ctx, args.StatePath, enc)
+	outputs, diags := c.Outputs(ctx, args.State.StatePath, enc)
 	if diags.HasErrors() {
 		view.Diagnostics(diags)
 		return 1
@@ -79,7 +78,7 @@ func (c *OutputCommand) Outputs(ctx context.Context, statePath string, enc encry
 
 	// Allow state path override
 	if statePath != "" {
-		c.Meta.statePath = statePath
+		c.Meta.stateArgs.StatePath = statePath
 	}
 
 	// Load the backend
@@ -111,23 +110,6 @@ func (c *OutputCommand) Outputs(ctx context.Context, statePath string, enc encry
 	}
 
 	return output, diags
-}
-
-func (c *OutputCommand) GatherVariables(args *arguments.Vars) {
-	// FIXME the arguments package currently trivially gathers variable related
-	// arguments in a heterogeneous slice, in order to minimize the number of
-	// code paths gathering variables during the transition to this structure.
-	// Once all commands that gather variables have been converted to this
-	// structure, we could move the variable gathering code to the arguments
-	// package directly, removing this shim layer.
-
-	varArgs := args.All()
-	items := make([]flags.RawFlag, len(varArgs))
-	for i := range varArgs {
-		items[i].Name = varArgs[i].Name
-		items[i].Value = varArgs[i].Value
-	}
-	c.Meta.variableArgs = flags.RawFlags{Items: &items}
 }
 
 func (c *OutputCommand) Help() string {

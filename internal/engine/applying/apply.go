@@ -16,6 +16,7 @@ import (
 	"github.com/opentofu/opentofu/internal/lang/eval"
 	"github.com/opentofu/opentofu/internal/lang/grapheval"
 	"github.com/opentofu/opentofu/internal/plans"
+	"github.com/opentofu/opentofu/internal/shared"
 	"github.com/opentofu/opentofu/internal/states"
 	"github.com/opentofu/opentofu/internal/tfdiags"
 )
@@ -30,6 +31,10 @@ import (
 // we have a stronger understanding of what those needs are.
 func ApplyPlannedChanges(ctx context.Context, plan *plans.Plan, configInst *eval.ConfigInstance, plugins plugins.Plugins) (*states.State, tfdiags.Diagnostics) {
 	var diags tfdiags.Diagnostics
+
+	// We'll make the "shared" tracer also available to everything we call.
+	tracer := contextTracer(ctx)
+	ctx = shared.ContextWithTracer(ctx, &tracer.Tracer)
 
 	glue := &evalGlue{
 		plugins: plugins,
@@ -48,6 +53,7 @@ func ApplyPlannedChanges(ctx context.Context, plan *plans.Plan, configInst *eval
 		return nil, diags
 	}
 	glue.graph = execGraph
+	glue.ops = execOps
 
 	reqTracker := newRequestTracker(execGraphSrc, execOps)
 	ctx = grapheval.ContextWithRequestTracker(ctx, reqTracker)
@@ -63,15 +69,11 @@ func ApplyPlannedChanges(ctx context.Context, plan *plans.Plan, configInst *eval
 
 type evalGlue struct {
 	graph   *execgraph.CompiledGraph
+	ops     *execOperations
 	plugins plugins.Plugins
 }
 
 // ResourceInstanceFinalState implements [eval.ApplyGlue].
 func (e *evalGlue) ResourceInstanceFinalState(ctx context.Context, addr addrs.AbsResourceInstance) cty.Value {
 	return e.graph.ResourceInstanceValue(ctx, addr)
-}
-
-// ValidateProviderConfig implements [eval.ApplyGlue].
-func (e *evalGlue) ValidateProviderConfig(ctx context.Context, provider addrs.Provider, configVal cty.Value) tfdiags.Diagnostics {
-	return e.plugins.ValidateProviderConfig(ctx, provider, configVal)
 }

@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"math/big"
 
@@ -24,7 +25,9 @@ import (
 	"github.com/opentofu/opentofu/internal/tfdiags"
 )
 
-func compileInstanceSelector(ctx context.Context, declScope exprs.Scope, forEachExpr hcl.Expression, countExpr hcl.Expression, enabledExpr hcl.Expression) configgraph.InstanceSelector {
+const maxCount = int64(math.MaxInt32)
+
+func compileInstanceSelector(ctx context.Context, declScope exprs.Scope, forEachExpr hcl.Expression, countExpr hcl.Expression, enabledExpr hcl.Expression, deps dependsOn) configgraph.InstanceSelector {
 	// We don't current verify that only one of the given expressions is set
 	// because we expect the configs package to check that.
 
@@ -32,54 +35,65 @@ func compileInstanceSelector(ctx context.Context, declScope exprs.Scope, forEach
 		return compileInstanceSelectorForEach(ctx, exprs.NewClosure(
 			exprs.EvalableHCLExpression(forEachExpr),
 			declScope,
-		))
+		), deps)
 	}
 	if countExpr != nil {
 		return compileInstanceSelectorCount(ctx, exprs.NewClosure(
 			exprs.EvalableHCLExpression(countExpr),
 			declScope,
-		))
+		), deps)
 	}
 	if enabledExpr != nil {
 		return compileInstanceSelectorEnabled(ctx, exprs.NewClosure(
 			exprs.EvalableHCLExpression(enabledExpr),
 			declScope,
-		))
+		), deps)
 	}
-	return compileInstanceSelectorSingleton(ctx)
+	return compileInstanceSelectorSingleton(ctx, deps)
 }
 
-func compileInstanceSelectorSingleton(_ context.Context) configgraph.InstanceSelector {
+func compileInstanceSelectorSingleton(_ context.Context, deps dependsOn) configgraph.InstanceSelector {
 	return &instanceSelector{
 		keyType:     addrs.NoKeyType,
 		sourceRange: nil,
-		selectInstances: func(ctx context.Context) (configgraph.Maybe[configgraph.InstancesSeq], cty.ValueMarks, tfdiags.Diagnostics) {
+		selectInstances: func(ctx context.Context) (exprs.FromValue[configgraph.InstancesSeq], tfdiags.Diagnostics) {
+			depMarks, diags := deps.Marks(ctx)
 			seq := func(yield func(addrs.InstanceKey, instances.RepetitionData) bool) {
 				yield(addrs.NoKey, instances.RepetitionData{})
 			}
-			return configgraph.Known(seq), nil, nil
+			return exprs.Known(seq).WithMarks(depMarks), diags
 		},
 	}
 }
 
-func compileInstanceSelectorCount(_ context.Context, countValuer exprs.Valuer) configgraph.InstanceSelector {
+func compileInstanceSelectorCount(_ context.Context, countValuer exprs.Valuer, deps dependsOn) configgraph.InstanceSelector {
 	countValuer = configgraph.ValuerOnce(countValuer)
 	return &instanceSelector{
 		keyType:     addrs.IntKeyType,
 		sourceRange: countValuer.ValueSourceRange(),
-		selectInstances: func(ctx context.Context) (configgraph.Maybe[configgraph.InstancesSeq], cty.ValueMarks, tfdiags.Diagnostics) {
+		selectInstances: func(ctx context.Context) (exprs.FromValue[configgraph.InstancesSeq], tfdiags.Diagnostics) {
 			var count int
+
 			countVal, diags := countValuer.Value(ctx)
 			if diags.HasErrors() {
-				return nil, nil, diags
+				return exprs.Unknown[configgraph.InstancesSeq](), diags
 			}
+
 			countVal, marks := countVal.Unmark()
+
+			depMarks, moreDiags := deps.Marks(ctx)
+			diags = diags.Append(moreDiags)
+			if len(depMarks) != 0 {
+				if marks == nil {
+					marks = make(cty.ValueMarks)
+				}
+				maps.Copy(marks, depMarks)
+			}
+
 			countVal, err := convert.Convert(countVal, cty.Number)
 			if err == nil && !countVal.IsKnown() {
-				// We represent "unknown" by returning a nil configgraph.Maybe
-				// without any error diagnostics, but we will still report
-				// what marks we found on the unknown value.
-				return nil, marks, diags
+				// We will still report what marks we found on the unknown value.
+				return exprs.Unknown[configgraph.InstancesSeq]().WithMarks(marks), diags
 			}
 			if err == nil && countVal.IsNull() {
 				err = errors.New("must not be null")
@@ -93,11 +107,8 @@ func compileInstanceSelectorCount(_ context.Context, countValuer exprs.Valuer) c
 					err = errors.New("must be a whole number")
 				} else if bf.Cmp(big.NewFloat(0)) < 0 {
 					err = errors.New("must not be a negative number")
-				} else if v, acc := bf.Int64(); acc != big.Exact || v > math.MaxInt {
-					// This will eventually result in a Go slice of the
-					// requested length, so we are constrained by Go's maximum
-					// slice length on the current platform.
-					err = fmt.Errorf("must be between 0 and %d, inclusive", math.MaxInt)
+				} else if v, acc := bf.Int64(); acc != big.Exact || v > maxCount {
+					err = fmt.Errorf("must be between 0 and %d, inclusive", maxCount)
 				}
 			}
 			if err == nil {
@@ -113,7 +124,7 @@ func compileInstanceSelectorCount(_ context.Context, countValuer exprs.Valuer) c
 					Detail:   fmt.Sprintf("Unsuitable value for the \"count\" meta-argument: %s.", tfdiags.FormatError(err)),
 					Subject:  configgraph.MaybeHCLSourceRange(countValuer.ValueSourceRange()),
 				})
-				return nil, marks, diags
+				return exprs.Unknown[configgraph.InstancesSeq]().WithMarks(marks), diags
 			}
 			// If we manage to get here then "count" is the desired number of
 			// instances, and so we'll yield incrementing integers up to
@@ -128,29 +139,37 @@ func compileInstanceSelectorCount(_ context.Context, countValuer exprs.Valuer) c
 					}
 				}
 			}
-			return configgraph.Known(seq), marks, nil
+			return exprs.Known(seq).WithMarks(marks), nil
 		},
 	}
 }
 
-func compileInstanceSelectorEnabled(_ context.Context, enabledValuer exprs.Valuer) configgraph.InstanceSelector {
+func compileInstanceSelectorEnabled(_ context.Context, enabledValuer exprs.Valuer, deps dependsOn) configgraph.InstanceSelector {
 	enabledValuer = configgraph.ValuerOnce(enabledValuer)
 	return &instanceSelector{
 		keyType:     addrs.NoKeyType,
 		sourceRange: nil,
-		selectInstances: func(ctx context.Context) (configgraph.Maybe[configgraph.InstancesSeq], cty.ValueMarks, tfdiags.Diagnostics) {
+		selectInstances: func(ctx context.Context) (exprs.FromValue[configgraph.InstancesSeq], tfdiags.Diagnostics) {
 			var enabled bool
 			enabledVal, diags := enabledValuer.Value(ctx)
 			if diags.HasErrors() {
-				return nil, nil, diags
+				return exprs.Unknown[configgraph.InstancesSeq](), diags
 			}
 			enabledVal, marks := enabledVal.Unmark()
+
+			depMarks, moreDiags := deps.Marks(ctx)
+			diags = diags.Append(moreDiags)
+			if len(depMarks) != 0 {
+				if marks == nil {
+					marks = make(cty.ValueMarks)
+				}
+				maps.Copy(marks, depMarks)
+			}
+
 			enabledVal, err := convert.Convert(enabledVal, cty.Bool)
 			if err == nil && !enabledVal.IsKnown() {
-				// We represent "unknown" by returning a nil configgraph.Maybe
-				// without any error diagnostics, but we will still report
-				// what marks we found on the unknown value.
-				return nil, marks, diags
+				// we will still report what marks we found on the unknown value
+				return exprs.Unknown[configgraph.InstancesSeq]().WithMarks(marks), diags
 			}
 			if err == nil && enabledVal.IsNull() {
 				err = errors.New("must not be null")
@@ -165,7 +184,7 @@ func compileInstanceSelectorEnabled(_ context.Context, enabledValuer exprs.Value
 					Detail:   fmt.Sprintf("Unsuitable value for the \"enabled\" meta-argument: %s.", tfdiags.FormatError(err)),
 					Subject:  configgraph.MaybeHCLSourceRange(enabledValuer.ValueSourceRange()),
 				})
-				return nil, marks, diags
+				return exprs.Unknown[configgraph.InstancesSeq]().WithMarks(marks), diags
 			}
 			// If we manage to get here then "enabled" is true only if there
 			// should be an instance of this resource.
@@ -174,24 +193,34 @@ func compileInstanceSelectorEnabled(_ context.Context, enabledValuer exprs.Value
 					yield(addrs.NoKey, instances.RepetitionData{})
 				}
 			}
-			return configgraph.Known(seq), marks, nil
+			return exprs.Known(seq).WithMarks(marks), nil
 		},
 	}
 }
 
-func compileInstanceSelectorForEach(_ context.Context, forEachValuer exprs.Valuer) configgraph.InstanceSelector {
+func compileInstanceSelectorForEach(_ context.Context, forEachValuer exprs.Valuer, deps dependsOn) configgraph.InstanceSelector {
 	forEachValuer = configgraph.ValuerOnce(forEachValuer)
 	return &instanceSelector{
 		keyType:     addrs.StringKeyType,
 		sourceRange: forEachValuer.ValueSourceRange(),
-		selectInstances: func(ctx context.Context) (configgraph.Maybe[configgraph.InstancesSeq], cty.ValueMarks, tfdiags.Diagnostics) {
+		selectInstances: func(ctx context.Context) (exprs.FromValue[configgraph.InstancesSeq], tfdiags.Diagnostics) {
 			const errSummary = "Invalid for_each argument"
 
 			rawVal, diags := forEachValuer.Value(ctx)
 			if diags.HasErrors() {
-				return nil, nil, diags
+				return exprs.Unknown[configgraph.InstancesSeq](), diags
 			}
 			rawVal, marks := rawVal.Unmark()
+
+			depMarks, moreDiags := deps.Marks(ctx)
+			diags = diags.Append(moreDiags)
+			if len(depMarks) != 0 {
+				if marks == nil {
+					marks = make(cty.ValueMarks)
+				}
+				maps.Copy(marks, depMarks)
+			}
+
 			if rawVal.IsNull() {
 				diags = diags.Append(&hcl.Diagnostic{
 					Severity: hcl.DiagError,
@@ -204,26 +233,47 @@ func compileInstanceSelectorForEach(_ context.Context, forEachValuer exprs.Value
 					// to this result. (This is true for all of the other
 					// diagnostics based on rawVal below, too.)
 				})
-				return nil, marks, diags
+				return exprs.Unknown[configgraph.InstancesSeq]().WithMarks(marks), diags
 			}
 
 			typ := rawVal.Type()
 			if typ.IsSetType() {
-				if !typ.ElementType().Equals(cty.String) {
+				// We accept only sets of string or of unknown element type.
+				// We must accept unknown element type so that it's valid to
+				// write:
+				//   for_each = toset([])
+				// ...since the toset function can't infer an element type
+				// automatically in that case, so it leaves it unspecified.
+				if !typ.ElementType().Equals(cty.String) && !typ.ElementType().Equals(cty.DynamicPseudoType) {
 					diags = diags.Append(&hcl.Diagnostic{
 						Severity: hcl.DiagError,
 						Summary:  errSummary,
 						Detail:   "When using a set with for_each, the element type must be string because the element values will be used as instance keys. To work with collections of values of other types, use a map instead.",
 						Subject:  forEachValuer.ValueSourceRange().ToHCL().Ptr(),
 					})
-					return nil, marks, diags
+					return exprs.Unknown[configgraph.InstancesSeq]().WithMarks(marks), diags
 				}
 				if !rawVal.IsWhollyKnown() {
-					return nil, marks, diags
+					return exprs.Unknown[configgraph.InstancesSeq]().WithMarks(marks), diags
+				}
+				// For sets it's also possible for an author to provide a null
+				// element, so we need to screen for that and reject it here
+				// to avoid problems below when we try to treat every element
+				// as a non-null string.
+				for k := range rawVal.Elements() {
+					if k.IsNull() {
+						diags = diags.Append(&hcl.Diagnostic{
+							Severity: hcl.DiagError,
+							Summary:  errSummary,
+							Detail:   "When using a set with for_each, a null element is not allowed because the element values will be used as instance keys.",
+							Subject:  forEachValuer.ValueSourceRange().ToHCL().Ptr(),
+						})
+						return exprs.Unknown[configgraph.InstancesSeq]().WithMarks(marks), diags
+					}
 				}
 			} else if typ.IsMapType() {
 				if !rawVal.IsKnown() {
-					return nil, marks, diags
+					return exprs.Unknown[configgraph.InstancesSeq]().WithMarks(marks), diags
 				}
 			} else if typ.IsObjectType() {
 				// An object type is always acceptable, because in that case
@@ -245,13 +295,13 @@ func compileInstanceSelectorForEach(_ context.Context, forEachValuer exprs.Value
 							}
 						}
 					}
-					return configgraph.Known(seq), marks, nil
+					return exprs.Known(seq).WithMarks(marks), nil
 
 				}
 			} else if typ.Equals(cty.DynamicPseudoType) {
 				// If we don't even know the type then we have to just assume
 				// it'll become something valid in a later phase.
-				return nil, marks, diags
+				return exprs.Unknown[configgraph.InstancesSeq]().WithMarks(marks), diags
 			} else {
 				diags = diags.Append(&hcl.Diagnostic{
 					Severity: hcl.DiagError,
@@ -259,7 +309,7 @@ func compileInstanceSelectorForEach(_ context.Context, forEachValuer exprs.Value
 					Detail:   "The for_each value must be either a mapping or a set of strings.",
 					Subject:  forEachValuer.ValueSourceRange().ToHCL().Ptr(),
 				})
-				return nil, marks, diags
+				return exprs.Unknown[configgraph.InstancesSeq]().WithMarks(marks), diags
 			}
 
 			// For all of the types we accepted above, cty.Value.Elements
@@ -280,7 +330,7 @@ func compileInstanceSelectorForEach(_ context.Context, forEachValuer exprs.Value
 					}
 				}
 			}
-			return configgraph.Known(seq), marks, nil
+			return exprs.Known(seq).WithMarks(marks), nil
 		},
 	}
 }
@@ -288,7 +338,7 @@ func compileInstanceSelectorForEach(_ context.Context, forEachValuer exprs.Value
 type instanceSelector struct {
 	keyType         addrs.InstanceKeyType
 	sourceRange     *tfdiags.SourceRange
-	selectInstances func(ctx context.Context) (configgraph.Maybe[configgraph.InstancesSeq], cty.ValueMarks, tfdiags.Diagnostics)
+	selectInstances func(ctx context.Context) (exprs.FromValue[configgraph.InstancesSeq], tfdiags.Diagnostics)
 }
 
 // InstanceKeyType implements configgraph.InstanceSelector.
@@ -297,7 +347,7 @@ func (i *instanceSelector) InstanceKeyType() addrs.InstanceKeyType {
 }
 
 // Instances implements configgraph.InstanceSelector.
-func (i *instanceSelector) Instances(ctx context.Context) (configgraph.Maybe[configgraph.InstancesSeq], cty.ValueMarks, tfdiags.Diagnostics) {
+func (i *instanceSelector) Instances(ctx context.Context) (exprs.FromValue[configgraph.InstancesSeq], tfdiags.Diagnostics) {
 	return i.selectInstances(ctx)
 }
 

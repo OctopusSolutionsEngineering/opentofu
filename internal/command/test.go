@@ -10,13 +10,13 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"maps"
 	"path"
 	"slices"
 	"sort"
 	"strings"
 	"time"
 
-	"github.com/opentofu/opentofu/internal/command/flags"
 	"github.com/opentofu/opentofu/internal/lang"
 
 	"github.com/hashicorp/hcl/v2"
@@ -142,8 +142,7 @@ func (c *TestCommand) Run(rawArgs []string) int {
 
 	// Users can also specify variables via the command line, so we'll parse
 	// all that here.
-	items := args.Vars.All()
-	c.variableArgs = flags.RawFlags{Items: &items}
+	c.variableArgs = args.Vars.All()
 
 	variables, variableDiags := c.collectVariableValuesWithTests(args.TestDirectory)
 	diags = diags.Append(variableDiags)
@@ -1339,9 +1338,7 @@ func (runner *TestFileRunner) prepareInputVariablesForAssertions(config *configs
 	// First, take a backup of the existing configuration so we can easily
 	// restore it later.
 	currentVars := make(map[string]*configs.Variable)
-	for name, variable := range config.Module.Variables {
-		currentVars[name] = variable
-	}
+	maps.Copy(currentVars, config.Module.Variables)
 
 	// Next, let's go through our entire inputs and add any that aren't already
 	// defined into the config.

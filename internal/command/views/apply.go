@@ -26,6 +26,10 @@ type Apply interface {
 
 	Diagnostics(diags tfdiags.Diagnostics)
 	HelpPrompt()
+
+	// Backend returns the non-command view that contains methods to provide
+	// progress output for the backend operations.
+	Backend() Backend
 }
 
 // NewApply returns an initialized Apply implementation for the given ViewType.
@@ -40,10 +44,9 @@ func NewApply(args arguments.ViewOptions, destroy bool, view *View) Apply {
 		}
 	case arguments.ViewHuman:
 		apply = &ApplyHuman{
-			view:         view,
-			destroy:      destroy,
-			inAutomation: view.RunningInAutomation(),
-			countHook:    &countHook{},
+			view:      view,
+			destroy:   destroy,
+			countHook: &countHook{},
 		}
 	default:
 		panic(fmt.Sprintf("unknown view type %v", args.ViewType))
@@ -103,13 +106,20 @@ func (m ApplyMulti) HelpPrompt() {
 	}
 }
 
+func (m ApplyMulti) Backend() Backend {
+	ret := make([]Backend, len(m))
+	for i, v := range m {
+		ret[i] = v.Backend()
+	}
+	return BackendMulti(ret)
+}
+
 // The ApplyHuman implementation renders human-readable text logs, suitable for
 // a scrolling terminal.
 type ApplyHuman struct {
 	view *View
 
-	destroy      bool
-	inAutomation bool
+	destroy bool
 
 	countHook *countHook
 }
@@ -171,7 +181,7 @@ func (v *ApplyHuman) Outputs(outputValues map[string]*states.OutputValue) {
 }
 
 func (v *ApplyHuman) Operation() Operation {
-	return NewOperation(arguments.ViewHuman, v.inAutomation, v.view)
+	return NewOperation(arguments.ViewHuman, v.view)
 }
 
 func (v *ApplyHuman) Hooks() []tofu.Hook {
@@ -188,6 +198,12 @@ func (v *ApplyHuman) HelpPrompt() {
 		command = "destroy"
 	}
 	v.view.HelpPrompt(command)
+}
+
+func (v *ApplyHuman) Backend() Backend {
+	return &BackendHuman{
+		view: v.view,
+	}
 }
 
 const stateOutPathPostApply = "The state of your infrastructure has been saved to the path below. This state is required to modify and destroy your infrastructure, so keep it safe. To inspect the complete state use the `tofu show` command."
@@ -244,4 +260,10 @@ func (v *ApplyJSON) Diagnostics(diags tfdiags.Diagnostics) {
 }
 
 func (v *ApplyJSON) HelpPrompt() {
+}
+
+func (v *ApplyJSON) Backend() Backend {
+	return &BackendJSON{
+		view: v.view,
+	}
 }

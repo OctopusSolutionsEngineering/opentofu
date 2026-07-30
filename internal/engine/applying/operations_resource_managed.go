@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"slices"
 
 	"github.com/zclconf/go-cty/cty"
 
@@ -24,15 +25,18 @@ import (
 // ManagedFinalPlan implements [exec.Operations].
 func (ops *execOperations) ManagedFinalPlan(
 	ctx context.Context,
+	metadata *exec.ResourceInstanceObjectMeta,
 	desired *eval.DesiredResourceInstance,
 	prior *exec.ResourceInstanceObject,
 	initialPlannedVal cty.Value,
-	providerClient *exec.ProviderClient,
 ) (*exec.ManagedResourceObjectFinalPlan, tfdiags.Diagnostics) {
 	var diags tfdiags.Diagnostics
 
 	var instAddr addrs.AbsResourceInstance
+	var providerConfigAddr addrs.AbsProviderInstanceCorrect
 	var resourceTypeName string
+	var requiredConfigResources addrs.Set[addrs.AbsResourceInstance]
+	var provisionersBefore, provisionersAfter []*eval.ResourceProvisioner
 	deposedKey := states.NotDeposed
 	if desired != nil {
 		// By the time we're in the apply phase the desired and prior addresses
@@ -43,10 +47,14 @@ func (ops *execOperations) ManagedFinalPlan(
 		instAddr = desired.Addr
 		// (deposed objects are never "desired")
 		resourceTypeName = desired.ResourceType
+		// TODO possibly nil here
+		providerConfigAddr = *desired.ProviderInstance
+		requiredConfigResources = desired.RequiredResourceInstances
 	} else if prior != nil {
-		instAddr = prior.InstanceAddr
-		deposedKey = prior.DeposedKey
+		instAddr = prior.Addr.InstanceAddr
+		deposedKey = prior.Addr.DeposedKey
 		resourceTypeName = prior.State.ResourceType
+		providerConfigAddr = prior.State.ProviderInstanceAddr
 	} else {
 		// Both should not be nil but if they are then we'll treat it the same
 		// way as if we dynamically discover that no change is actually
@@ -55,15 +63,60 @@ func (ops *execOperations) ManagedFinalPlan(
 		return nil, diags
 	}
 	objAddr := instAddr.Object(deposedKey)
-	log.Printf("[TRACE] apply phase: ManagedFinalPlan %s using %s", objAddr, providerClient.InstanceAddr)
+	log.Printf("[TRACE] apply phase: ManagedFinalPlan %s using %s", objAddr, providerConfigAddr)
 
-	providerAddr := providerClient.InstanceAddr.Config.Config.Provider
-	resourceType := resources.NewManagedResourceType(providerAddr, resourceTypeName, providerClient.Ops)
+	if desired != nil && prior == nil { // creating
+		provisionersAfter = metadata.PostCreateProvisioners
+	} else if prior != nil && desired == nil { // deleting
+		if prior.State.Status == states.ObjectTainted {
+			// No point in provisioning an object that is already tainted, since
+			// it's going to get recreated on the next apply anyway.
+			log.Printf("[TRACE] %s is tainted, so skipping provisioning", instAddr)
+		} else {
+			provisionersBefore = metadata.PreDeleteProvisioners
+		}
+	}
+
+	tracer := contextTracer(ctx)
+	if cb := tracer.StartManagedResourceInstanceObjectFinalPlan; cb != nil {
+		priorVal := cty.NullVal(cty.DynamicPseudoType)
+		if prior != nil && prior.State != nil {
+			priorVal = prior.State.Value
+		}
+		configVal := cty.NullVal(cty.DynamicPseudoType)
+		if desired != nil {
+			configVal = desired.ConfigVal
+		}
+		ctx = cb(ctx, objAddr, priorVal, configVal, initialPlannedVal)
+	}
+	plannedVal := cty.DynamicVal // reassigned once we have a final value to return
+	if cb := tracer.EndManagedResourceInstanceObjectFinalPlan; cb != nil {
+		priorVal := cty.NullVal(cty.DynamicPseudoType)
+		if prior != nil && prior.State != nil {
+			priorVal = prior.State.Value
+		}
+		defer func() { // Extra closure to delay evaluating plannedVal and diags until we actually return
+			cb(ctx, objAddr, priorVal, plannedVal, diags)
+		}()
+	}
+
+	providerClient, moreDiags := ops.configOracle.ProviderInstance(ctx, providerConfigAddr)
+	diags = diags.Append(moreDiags)
+	if diags.HasErrors() {
+		return nil, diags
+	}
+
+	providerAddr := providerConfigAddr.Config.Config.Provider
+	resourceType := resources.NewManagedResourceType(providerAddr, resourceTypeName, providerClient)
 
 	var desiredVal, currentVal cty.Value
 	var currentPrivate []byte
 	if desired != nil {
-		desiredVal = desired.ConfigVal
+		desiredVal, moreDiags = ops.resourceDependenciesMissingCheck("resource", instAddr.String(), desired.ConfigVal)
+		diags = diags.Append(moreDiags)
+		if moreDiags.HasErrors() {
+			return nil, diags
+		}
 	}
 	if prior != nil {
 		currentVal = prior.State.Value
@@ -94,14 +147,18 @@ func (ops *execOperations) ManagedFinalPlan(
 		return nil, diags
 	}
 
+	plannedVal = resp.Planned.Value // for our deferred call to tracer.EndManagedResourceInstanceObjectFinalPlan
 	return &exec.ManagedResourceObjectFinalPlan{
-		InstanceAddr:    instAddr,
-		DeposedKey:      deposedKey,
-		ResourceType:    resourceTypeName,
-		PriorStateVal:   resp.Current.Value,
-		ConfigVal:       resp.DesiredValue,
-		PlannedVal:      resp.Planned.Value,
-		ProviderPrivate: resp.Planned.Private,
+		Addr:                      instAddr.Object(deposedKey),
+		ResourceType:              resourceTypeName,
+		RequiredResourceInstances: requiredConfigResources,
+		PriorStateVal:             resp.Current.Value,
+		ConfigVal:                 resp.DesiredValue,
+		PlannedVal:                resp.Planned.Value,
+		ProvisionersBefore:        provisionersBefore,
+		ProvisionersAfter:         provisionersAfter,
+		ProviderInstance:          providerConfigAddr,
+		ProviderPrivate:           resp.Planned.Private,
 	}, diags
 }
 
@@ -110,7 +167,6 @@ func (ops *execOperations) ManagedApply(
 	ctx context.Context,
 	plan *exec.ManagedResourceObjectFinalPlan,
 	fallback *exec.ResourceInstanceObject,
-	providerClient *exec.ProviderClient,
 ) (*exec.ResourceInstanceObject, tfdiags.Diagnostics) {
 	var diags tfdiags.Diagnostics
 	if plan == nil {
@@ -124,20 +180,35 @@ func (ops *execOperations) ManagedApply(
 		log.Printf("[TRACE] apply phase: ManagedApply skipped because no change is needed")
 		return nil, diags
 	}
-	if plan.DeposedKey == states.NotDeposed {
-		log.Printf("[TRACE] apply phase: ManagedApply %s using %s", plan.InstanceAddr, providerClient.InstanceAddr)
-	} else {
-		log.Printf("[TRACE] apply phase: ManagedApply %s deposed object %s using %s", plan.InstanceAddr, plan.DeposedKey, providerClient.InstanceAddr)
-	}
-	if fallback != nil && plan.DeposedKey != states.NotDeposed {
-		// This should not happen: we can't have a fallback deposed object
-		// when the object we're applying is already deposed itself.
-		// (This is just a safety check because below we're still using the
-		// old states.SyncState API that wants to model the fallback as
-		// "maybe restore the deposed object to current" instead of just
-		// generically rewriting the fallback object's address to not be deposed.
-		diags = diags.Append(fmt.Errorf("can't apply changes to %s deposed object %s with fallback to deposed object %s", plan.InstanceAddr, plan.DeposedKey, fallback.DeposedKey))
-		return nil, diags
+
+	providerConfigAddr := plan.ProviderInstance
+
+	log.Printf("[TRACE] apply phase: ManagedApply %s using %s", plan.Addr, providerConfigAddr)
+	if fallback != nil {
+		if plan.Addr.IsDeposed() {
+			// This should not happen: we can't have a fallback deposed object
+			// when the object we're applying is already deposed itself.
+			// (This is just a safety check because below we're still using the
+			// old states.SyncState API that wants to model the fallback as
+			// "maybe restore the deposed object to current" instead of just
+			// generically rewriting the fallback object's address to not be deposed.
+			diags = diags.Append(fmt.Errorf("can't apply changes to %s with fallback to deposed object %s", plan.Addr, fallback.Addr.DeposedKey))
+			return nil, diags
+		}
+		if !fallback.Addr.IsDeposed() {
+			// This should also not happen: the fallback object must always
+			// be a deposed object that would become current again if we
+			// fail to create the new object.
+			diags = diags.Append(fmt.Errorf("can't apply changes to %s with fallback to non-deposed object %s", plan.Addr, fallback.Addr))
+			return nil, diags
+		}
+		if !fallback.Addr.InstanceAddr.Equal(plan.Addr.InstanceAddr) {
+			// This should also not happen: we should always be falling back
+			// to a deposed object from the same resource instance we're trying
+			// to create a new current object for here, since the fallback
+			// will become the current instead if creation fails.
+			diags = diags.Append(fmt.Errorf("can't apply changes to %s with fallback to %s: resource instance must match", plan.Addr, fallback.Addr))
+		}
 	}
 
 	// This particular operation has a broader scope than most of them because
@@ -149,7 +220,18 @@ func (ops *execOperations) ManagedApply(
 	// that comes at the expense of this function doing considerably more
 	// work than most other operation methods do.
 
-	providerAddr := providerClient.InstanceAddr.Config.Config.Provider
+	tracer := contextTracer(ctx)
+	if cb := tracer.StartManagedResourceInstanceObjectApply; cb != nil {
+		ctx = cb(ctx, plan.Addr, plan.PriorStateVal, plan.PlannedVal)
+	}
+	resultVal := cty.DynamicVal // reassigned once we have a final value to return
+	if cb := tracer.EndManagedResourceInstanceObjectApply; cb != nil {
+		defer func() { // Extra closure to delay evaluating resultVal and diags until we actually return
+			cb(ctx, plan.Addr, resultVal, diags)
+		}()
+	}
+
+	providerAddr := providerConfigAddr.Config.Config.Provider
 	schema, moreDiags := ops.plugins.ResourceTypeSchema(
 		ctx,
 		providerAddr,
@@ -160,6 +242,8 @@ func (ops *execOperations) ManagedApply(
 	if moreDiags.HasErrors() {
 		return nil, diags
 	}
+
+	objAddr := plan.Addr
 
 	// TODO: Encapsulate most of the following logic into a method of
 	// [resources.ManagedResourceType].
@@ -182,7 +266,26 @@ func (ops *execOperations) ManagedApply(
 		plannedValUnmarked = cty.NullVal(schema.Block.ImpliedType())
 	}
 
-	resp := providerClient.Ops.ApplyResourceChange(ctx, providers.ApplyResourceChangeRequest{
+	providerClient, moreDiags := ops.configOracle.ProviderInstance(ctx, providerConfigAddr)
+	diags = diags.Append(moreDiags)
+	if diags.HasErrors() {
+		return nil, diags
+	}
+
+	if provs := plan.ProvisionersBefore; len(provs) != 0 {
+		log.Printf("[TRACE] apply phase: ManagedApply running %d pre-apply provisioner(s) for %s", len(provs), plan.Addr)
+		for _, prov := range provs {
+			cont, provDiags := ops.runProvisioner(ctx, objAddr, prov, plan.PriorStateVal)
+			diags = diags.Append(provDiags)
+			if !cont {
+				log.Printf("[TRACE] apply phase: ManagedApply %s pre-apply provisioner failed, so aborting", plan.Addr)
+				return nil, diags
+			}
+		}
+		log.Printf("[TRACE] apply phase: ManagedApply %s pre-apply provisioners finished", plan.Addr)
+	}
+
+	resp := providerClient.ApplyResourceChange(ctx, providers.ApplyResourceChangeRequest{
 		TypeName:       plan.ResourceType,
 		PriorState:     priorValUnmarked,
 		Config:         configValUnmarked,
@@ -200,37 +303,52 @@ func (ops *execOperations) ManagedApply(
 				"Provider produced inconsistent result after apply",
 				fmt.Sprintf(
 					"Provider %s did not return an error when applying changes for %s, but it also didn't return a new object to save.\n\nThis is a bug in the provider, which should be reported in the provider's own issue tracker.",
-					providerAddr, plan.InstanceAddr,
+					providerAddr, plan.Addr,
 				),
 			))
 		}
 		// If we were given a "fallback" object then we need to restore it
 		// back to being the current object for our resource instance before
 		// we return.
-		ok := ops.workingState.MaybeRestoreResourceInstanceDeposed(fallback.InstanceAddr, fallback.DeposedKey)
-		if !ok {
-			diags = diags.Append(tfdiags.Sourceless(
-				tfdiags.Error,
-				"Failed to restore deposed object",
-				fmt.Sprintf(
-					"Failed to restore %s deposed object %s as the current object after failing to create its replacement.\n\nThe next plan will propose to destroy this deposed object. This is a bug in OpenTofu.",
-					fallback.InstanceAddr, fallback.DeposedKey,
-				),
-			))
+		if fallback != nil {
+			ok := ops.workingState.MaybeRestoreResourceInstanceDeposed(fallback.Addr.InstanceAddr, fallback.Addr.DeposedKey)
+			if !ok {
+				diags = diags.Append(tfdiags.Sourceless(
+					tfdiags.Error,
+					"Failed to restore deposed object",
+					fmt.Sprintf(
+						"Failed to restore %s deposed object %s as the current object after failing to create its replacement.\n\nThe next plan will propose to destroy this deposed object. This is a bug in OpenTofu.",
+						fallback.Addr.InstanceAddr, fallback.Addr.DeposedKey,
+					),
+				))
+			}
 		}
-		result, moreDiags := ops.resourceInstanceStateObject(ctx, ops.workingState, plan.InstanceAddr, states.NotDeposed)
+		result, moreDiags := ops.resourceInstanceStateObject(ctx, ops.workingState, plan.Addr.InstanceAddr, states.NotDeposed)
 		diags = diags.Append(moreDiags)
 		return result, diags
+	}
+
+	if provs := plan.ProvisionersAfter; len(provs) != 0 {
+		log.Printf("[TRACE] apply phase: ManagedApply running %d post-apply provisioner(s) for %s", len(provs), plan.Addr)
+		for _, prov := range provs {
+			// FIXME: resp.NewState isn't the correct value to use here because
+			// it hasn't yet had marks applied to it, and so provisioner
+			// execution won't be able to notice when arguments are sensitive,
+			// etc.
+			cont, provDiags := ops.runProvisioner(ctx, objAddr, prov, resp.NewState)
+			diags = diags.Append(provDiags)
+			if !cont {
+				log.Printf("[TRACE] apply phase: ManagedApply %s post-apply provisioner failed, so aborting", plan.Addr)
+				break
+			}
+		}
+		log.Printf("[TRACE] apply phase: ManagedApply %s post-apply provisioners finished", plan.Addr)
 	}
 
 	// TODO: objchange.AssertObjectCompatible to verify that the result is
 	// consistent with what was planned. (That'll need the provider schema
 	// we fetched above, but currently we're just discarding that schema.)
 
-	// FIXME: Change [exec.ManagedResourceObjectFinalPlan] to use
-	// [addrs.AbsResourceInstanceObject] itself, instead of separate instance
-	// address and deposed key fields.
-	objAddr := plan.InstanceAddr.Object(plan.DeposedKey)
 	var state *states.ResourceInstanceObjectFull
 	if !resp.NewState.IsNull() {
 		status := states.ObjectTainted
@@ -241,7 +359,7 @@ func (ops *execOperations) ManagedApply(
 			Status:               status,
 			Value:                resp.NewState,
 			Private:              resp.Private,
-			ProviderInstanceAddr: providerClient.InstanceAddr,
+			ProviderInstanceAddr: providerConfigAddr,
 			ResourceType:         plan.ResourceType,
 			SchemaVersion:        uint64(schema.Version),
 
@@ -251,6 +369,17 @@ func (ops *execOperations) ManagedApply(
 			// "create_before_destroy" set into the final plan and then
 			// populate CreateBeforeDestroy here.
 		}
+
+		// Legacy: This translates abs resource instances to config resources
+		configDeps := addrs.MakeSet[addrs.ConfigResource]()
+		for inst := range plan.RequiredResourceInstances.All() {
+			configDeps.Add(inst.ConfigResource())
+		}
+		state.ConfigDependencies = slices.Collect(configDeps.All())
+
+		// Modern: Precise dependencies
+		state.Dependencies = slices.Collect(plan.RequiredResourceInstances.All())
+
 		stateSrc, err := states.EncodeResourceInstanceObjectFull(state, schema.Block.ImpliedType())
 		if err != nil {
 			// This is a worst-case scenario where we've successfully changed
@@ -260,7 +389,7 @@ func (ops *execOperations) ManagedApply(
 			// already been decoded using the same schema if it came from a plugin,
 			// and so it should definitely conform to that schema.
 			// FIXME: A proper error message for this.
-			diags = diags.Append(fmt.Errorf("failed to encode the new state for %s: %w", plan.InstanceAddr, err))
+			diags = diags.Append(fmt.Errorf("failed to encode the new state for %s: %w", plan.Addr, err))
 			return nil, diags
 		}
 		ops.workingState.SetResourceInstanceObjectFull(objAddr, stateSrc)
@@ -270,41 +399,67 @@ func (ops *execOperations) ManagedApply(
 		// Unfortunately this API is still a little quirkly and wants us to
 		// pass the provider instance address so that it can update some
 		// resource-level and instance-level metadata as a side-effect.
-		ops.workingState.RemoveResourceInstanceObjectFull(objAddr, providerClient.InstanceAddr)
+		ops.workingState.RemoveResourceInstanceObjectFull(objAddr, providerConfigAddr)
+	}
+
+	if state != nil {
+		resultVal = state.Value // for our deferred call to tracer.EndManagedResourceInstanceObjectApply
+	} else {
+		resultVal = cty.NullVal(schema.Block.ImpliedType())
 	}
 
 	ret := &exec.ResourceInstanceObject{
-		InstanceAddr: plan.InstanceAddr,
-		DeposedKey:   plan.DeposedKey,
-		State:        state, // nil if the object was deleted
+		Addr:  plan.Addr,
+		State: state, // nil if the object was deleted
 	}
 	return ret, diags
 }
 
-// ManagedDepose implements [exec.Operations].
-func (ops *execOperations) ManagedDepose(
+// ManagedPerformDepose implements [exec.Operations].
+func (ops *execOperations) ManagedPerformDepose(
 	ctx context.Context,
 	currentObj *exec.ResourceInstanceObject,
+	deletePlan *exec.ManagedResourceObjectFinalPlan,
 ) (*exec.ResourceInstanceObject, tfdiags.Diagnostics) {
 	var diags tfdiags.Diagnostics
 	if currentObj == nil {
-		log.Println("[TRACE] apply phase: ManagedDepose with nil object (ignored)")
+		log.Println("[TRACE] apply phase: ManagedPerformDepose with nil object (ignored)")
 		return nil, diags
 	}
-	log.Printf("[TRACE] apply phase: ManagedDepose %s", currentObj.InstanceAddr)
-
-	deposedKey := ops.workingState.DeposeResourceInstanceObject(currentObj.InstanceAddr)
-	if deposedKey == states.NotDeposed {
-		// We should not get here with a correctly-constructed execution graph
-		// because currentObj being non-nil means that there should definitely
-		// be something to depose.
+	if deletePlan == nil || deletePlan.Addr.IsCurrent() || !deletePlan.PlannedVal.IsNull() || !deletePlan.Addr.InstanceAddr.Equal(currentObj.Addr.InstanceAddr) {
+		// None of these situations should arise for a correct execution graph.
 		diags = diags.Append(fmt.Errorf(
-			"failed to depose the current object for %s; this is a bug in OpenTofu",
-			currentObj.InstanceAddr,
+			"invalid delete plan for %s; this is a bug in OpenTofu",
+			currentObj.Addr.InstanceAddr,
 		))
 		return nil, diags
 	}
+	log.Printf("[TRACE] apply phase: ManagedPerformDepose %s as %s", currentObj.Addr, deletePlan.Addr.DeposedKey)
+	if currentObj.Addr.IsDeposed() {
+		diags = diags.Append(fmt.Errorf(
+			"attempting do depose %s when it's already deposed; this is a bug in OpenTofu",
+			currentObj.Addr,
+		))
+		return nil, diags
+	}
+
+	deposedKey := deletePlan.Addr.DeposedKey
+	ops.workingState.DeposeResourceInstanceObjectForceKey(deletePlan.Addr.InstanceAddr, deposedKey)
 	return currentObj.IntoDeposed(deposedKey), diags
+}
+
+// ManagedDeposedMeta implements [exec.Operations].
+func (ops *execOperations) ManagedDeposedMeta(ctx context.Context, instAddr addrs.AbsResourceInstance, deposedKey states.DeposedKey, prior *exec.ResourceInstanceObject) (*exec.ResourceInstanceObjectMeta, tfdiags.Diagnostics) {
+	log.Printf("[TRACE] apply phase: ManagedDeposedMeta %s deposed object %s", instAddr, deposedKey)
+
+	objAddr := instAddr.Object(deposedKey)
+	configMeta := ops.configOracle.ResourceInstanceObjectMeta(ctx, objAddr)
+	var state *states.ResourceInstanceObjectFull
+	if prior != nil {
+		state = prior.State
+	}
+
+	return exec.BuildResourceInstanceObjectMeta(objAddr, configMeta, state), nil
 }
 
 // ManagedAlreadyDeposed implements [exec.Operations].
@@ -331,14 +486,26 @@ func (ops *execOperations) ManagedChangeAddr(
 		log.Println("[TRACE] apply phase: ManagedChangeAddr with nil object (ignored)")
 		return nil, diags
 	}
-	log.Printf("[TRACE] apply phase: ManagedChangeAddr from %s to %s", currentObj.InstanceAddr, newAddr)
-	if !ops.workingState.MaybeMoveResourceInstance(currentObj.InstanceAddr, newAddr) {
+	log.Printf("[TRACE] apply phase: ManagedChangeAddr from %s to %s", currentObj.Addr, newAddr)
+
+	// Only "current" objects are expected to move between addresses in this
+	// way, because the only reasonable thing to do with a deposed object is
+	// to destroy it.
+	if currentObj.Addr.IsDeposed() {
+		diags = diags.Append(fmt.Errorf(
+			"can't move %s to %s; this is a bug in OpenTofu",
+			currentObj.Addr, newAddr,
+		))
+		return nil, diags
+	}
+
+	if !ops.workingState.MaybeMoveResourceInstance(currentObj.Addr.InstanceAddr, newAddr) {
 		// We should not get here with a correctly-constructed execution graph
 		// because currentObj being non-nil means that there should definitely
 		// be something to move.
 		diags = diags.Append(fmt.Errorf(
 			"failed to move %s to %s; this is a bug in OpenTofu",
-			currentObj.InstanceAddr, newAddr,
+			currentObj.Addr, newAddr,
 		))
 		return nil, diags
 	}

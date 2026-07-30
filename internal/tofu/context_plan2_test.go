@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/davecgh/go-spew/spew"
 	"github.com/google/go-cmp/cmp"
@@ -26,6 +27,7 @@ import (
 	"github.com/opentofu/opentofu/internal/checks"
 	"github.com/opentofu/opentofu/internal/configs"
 	"github.com/opentofu/opentofu/internal/plugins"
+	"github.com/opentofu/opentofu/internal/shared"
 
 	"github.com/opentofu/opentofu/internal/configs/configschema"
 	"github.com/opentofu/opentofu/internal/lang/marks"
@@ -33,9 +35,13 @@ import (
 	"github.com/opentofu/opentofu/internal/providers"
 	"github.com/opentofu/opentofu/internal/states"
 	"github.com/opentofu/opentofu/internal/tfdiags"
+
+	regaddr "github.com/opentofu/registry-address/v2"
 )
 
 func TestContext2Plan_removedDuringRefresh(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureUpgradeState, ExperimentalFeatureTaint)
+
 	// This tests the situation where an object tracked in the previous run
 	// state has been deleted outside OpenTofu, which we should detect
 	// during the refresh step and thus ultimately produce a plan to recreate
@@ -335,6 +341,8 @@ resource "test_object" "a" {
 }
 
 func TestContext2Plan_dataReferencesResourceInModules(t *testing.T) {
+	SkipExperimental(t, ExperimentalBugDeclareProvider)
+
 	p := testProvider("test")
 	p.ReadDataSourceFn = func(req providers.ReadDataSourceRequest) (resp providers.ReadDataSourceResponse) {
 		cfg := req.Config.AsValueMap()
@@ -369,7 +377,8 @@ data "test_data_source" "d" {
 resource "test_resource" "b" {
   value = data.test_data_source.d.id
 }
-`})
+`,
+	})
 
 	oldDataAddr := mustResourceInstanceAddr(`module.mod["old"].data.test_data_source.d`)
 
@@ -420,6 +429,8 @@ resource "test_resource" "b" {
 }
 
 func TestContext2Plan_resourceChecksInExpandedModule(t *testing.T) {
+	SkipExperimental(t, ExperimentalBugDeclareProvider, ExperimentalFeatureChecks)
+
 	// When a resource is in a nested module we have two levels of expansion
 	// to do: first expand the module the resource is declared in, and then
 	// expand the resource itself.
@@ -543,6 +554,8 @@ func TestContext2Plan_resourceChecksInExpandedModule(t *testing.T) {
 }
 
 func TestContext2Plan_dataResourceChecksManagedResourceChange(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureChanges)
+
 	// This tests the situation where the remote system contains data that
 	// isn't valid per a data resource postcondition, but that the
 	// configuration is destined to make the remote system valid during apply
@@ -657,7 +670,8 @@ data "test_data_source" "a" {
 		}
 	}
 }
-`})
+`,
+	})
 
 	managedAddr := mustResourceInstanceAddr(`test_resource.a`)
 	dataAddr := mustResourceInstanceAddr(`data.test_data_source.a`)
@@ -742,10 +756,11 @@ data "test_data_source" "a" {
 	if got, want := validVal, cty.True; got != want {
 		t.Errorf("wrong final valid value\ngot:  %#v\nwant: %#v", got, want)
 	}
-
 }
 
 func TestContext2Plan_managedResourceChecksOtherManagedResourceChange(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureCondition)
+
 	// This tests the incorrect situation where a managed resource checks
 	// another managed resource indirectly via a data resource.
 	// This doesn't work because OpenTofu can't tell that the data resource
@@ -870,7 +885,8 @@ resource "test_resource" "b" {
 		}
 	}
 }
-`})
+`,
+	})
 
 	managedAddrA := mustResourceInstanceAddr(`test_resource.a`)
 	managedAddrB := mustResourceInstanceAddr(`test_resource.b`)
@@ -924,6 +940,11 @@ resource "test_resource" "b" {
 }
 
 func TestContext2Plan_destroyWithRefresh(t *testing.T) {
+	// At the time of writing this comment, the new runtime's planning engine
+	// only performs upgrade and refresh for desired resource instances, and
+	// not for orphan resource instances.
+	SkipExperimental(t, ExperimentalFeatureUpgradeUnwanted)
+
 	m := testModuleInline(t, map[string]string{
 		"main.tf": `
 resource "test_object" "a" {
@@ -1050,6 +1071,8 @@ resource "test_object" "a" {
 }
 
 func TestContext2Plan_destroyWithRefresh_skipImport(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureImport, ExperimentalFeatureDestroy)
+
 	m := testModuleInline(t, map[string]string{
 		"main.tf": `
 resource "test_object" "a" {
@@ -1124,6 +1147,11 @@ import {
 }
 
 func TestContext2Plan_destroySkipRefresh(t *testing.T) {
+	// At the time of writing this comment, the new runtime's planning engine
+	// only performs upgrade and refresh for desired resource instances, and
+	// not for orphan resource instances.
+	SkipExperimental(t, ExperimentalFeatureUpgradeUnwanted)
+
 	m := testModuleInline(t, map[string]string{
 		"main.tf": `
 resource "test_object" "a" {
@@ -1226,6 +1254,8 @@ resource "test_object" "a" {
 }
 
 func TestContext2Plan_unmarkingSensitiveAttributeForOutput(t *testing.T) {
+	SkipExperimental(t, ExperimentalFlagUnknown)
+
 	m := testModuleInline(t, map[string]string{
 		"main.tf": `
 resource "test_resource" "foo" {
@@ -1327,6 +1357,8 @@ provider "test" {
 }
 
 func TestContext2Plan_movedResourceBasic(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureMoved)
+
 	addrA := mustResourceInstanceAddr("test_object.a")
 	addrB := mustResourceInstanceAddr("test_object.b")
 	m := testModuleInline(t, map[string]string{
@@ -1401,6 +1433,8 @@ func constructProviderSchemaForTesting(attrs map[string]*configschema.Attribute)
 }
 
 func TestContext2Plan_movedResourceToDifferentType(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureMoved)
+
 	type test struct {
 		name          string
 		mockProvider  *MockProvider
@@ -1410,6 +1444,7 @@ func TestContext2Plan_movedResourceToDifferentType(t *testing.T) {
 		newSchema     providers.Schema
 		oldType       string
 		newType       string
+		newAddr       string
 		config        map[string]string
 		attrsJSON     []byte
 		wantOp        plans.Action
@@ -1698,12 +1733,122 @@ func TestContext2Plan_movedResourceToDifferentType(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "different provider addr with same schema (explicit)",
+			oldSchema: constructProviderSchemaForTesting(map[string]*configschema.Attribute{
+				"test_number": {
+					Type:     cty.Number,
+					Required: true,
+				},
+			}),
+			newSchema: constructProviderSchemaForTesting(map[string]*configschema.Attribute{
+				"test_number": {
+					Type:     cty.Number,
+					Required: true,
+				},
+			}),
+			oldType: "provider_object",
+			newType: "provider_object",
+			newAddr: "provider_object.new[0]",
+			config: map[string]string{
+				"main.tf": `
+					resource "provider_object" "new" {
+					        count = 1
+						test_number = 1
+					}
+					moved {
+						from = provider_object.old
+						to   = provider_object.new[0]
+					}
+				`,
+			},
+			attrsJSON: []byte(`{"test_number": 1}`),
+			wantOp:    plans.NoOp,
+			providerAddr1: &addrs.AbsProviderConfig{
+				Provider: addrs.NewBuiltInProvider("provider"),
+			},
+			providerAddr2: &addrs.AbsProviderConfig{
+				Provider: addrs.NewDefaultProvider("provider"),
+			},
+			mockProvider: &MockProvider{
+				GetProviderSchemaResponse: &providers.GetProviderSchemaResponse{
+					ResourceTypes: map[string]providers.Schema{
+						"provider_object": constructProviderSchemaForTesting(map[string]*configschema.Attribute{
+							"test_number": {
+								Type:     cty.Number,
+								Required: true,
+							},
+						}),
+					},
+				},
+				MoveResourceStateResponse: &providers.MoveResourceStateResponse{
+					TargetState: cty.ObjectVal(map[string]cty.Value{
+						"test_number": cty.NumberIntVal(1),
+					}),
+				},
+			},
+		},
+		{
+			name: "different provider addr with same schema (implicit)",
+			oldSchema: constructProviderSchemaForTesting(map[string]*configschema.Attribute{
+				"test_number": {
+					Type:     cty.Number,
+					Required: true,
+				},
+			}),
+			newSchema: constructProviderSchemaForTesting(map[string]*configschema.Attribute{
+				"test_number": {
+					Type:     cty.Number,
+					Required: true,
+				},
+			}),
+			oldType: "provider_object",
+			newType: "provider_object",
+			config: map[string]string{
+				"main.tf": `
+					resource "provider_object" "new" {
+					        count = 1
+						test_number = 1
+					}
+					// This is an *IMPLICIT* move and should not perform a MovedResource provider request
+					// This matches what is in the provider framework documentation, but differs from
+					// terraform (as far as we can tell from black box testing)
+					// See discussion in https://github.com/opentofu/opentofu/issues/4374#issuecomment-5022178852
+				`,
+			},
+			attrsJSON: []byte(`{"test_number": 1}`),
+			providerAddr1: &addrs.AbsProviderConfig{
+				Provider: addrs.NewBuiltInProvider("provider"),
+			},
+			providerAddr2: &addrs.AbsProviderConfig{
+				Provider: addrs.NewDefaultProvider("provider"),
+			},
+			wantErrStr: "Showing Upgrade instead of moved: contrived test",
+			mockProvider: &MockProvider{
+				GetProviderSchemaResponse: &providers.GetProviderSchemaResponse{
+					ResourceTypes: map[string]providers.Schema{
+						"provider_object": constructProviderSchemaForTesting(map[string]*configschema.Attribute{
+							"test_number": {
+								Type:     cty.Number,
+								Required: true,
+							},
+						}),
+					},
+				},
+				UpgradeResourceStateResponse: &providers.UpgradeResourceStateResponse{
+					Diagnostics: tfdiags.New(tfdiags.Sourceless(tfdiags.Error, "Showing Upgrade instead of moved", "contrived test")),
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			oldAddr := mustResourceInstanceAddr(tt.oldType + ".old")
 			newAddr := mustResourceInstanceAddr(tt.newType + ".new")
+			if tt.newAddr != "" {
+				newAddr = mustResourceInstanceAddr(tt.newAddr)
+			}
 			m := testModuleInline(t, tt.config)
 
 			providerAddr := addrs.AbsProviderConfig{
@@ -1790,8 +1935,129 @@ func TestContext2Plan_movedResourceToDifferentType(t *testing.T) {
 		})
 	}
 }
+func TestContext2Plan_movedResourceToDifferentProvider(t *testing.T) {
+	// This tests a rare scenario where providers might
+	// change during a move, as brought up here:
+	// https://github.com/opentofu/opentofu/issues/4271
+	SkipExperimental(t, ExperimentalFeatureMoved)
+
+	type test struct {
+		name      string
+		schema    providers.Schema
+		resType   string
+		config    map[string]string
+		attrsJSON []byte
+	}
+
+	tests := []test{
+		{
+			name: "providers have same local name, but different namespace",
+			schema: constructProviderSchemaForTesting(map[string]*configschema.Attribute{
+				"test_number": {
+					Type:     cty.Number,
+					Optional: true,
+				},
+			}),
+			resType: "test_object",
+			config: map[string]string{
+				"main.tf": `
+					terraform {
+						required_providers {
+							test = {
+								source = "opentofu/test"
+							}
+						}
+					}
+
+					resource "test_object" "new" {
+
+					}
+					moved {
+						from = test_object.old
+						to   = test_object.new
+					}
+				`,
+			},
+			attrsJSON: []byte(`{}`),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			oldAddr := mustResourceInstanceAddr(tt.resType + ".old")
+			m := testModuleInline(t, tt.config)
+
+			providerAddr1 := addrs.AbsProviderConfig{
+				Provider: regaddr.Provider{
+					Type:      addrs.MustParseProviderPart("test"),
+					Namespace: "hashicorp",
+					Hostname:  addrs.DefaultProviderRegistryHost,
+				},
+				Module: addrs.RootModule,
+			}
+
+			providerAddr2 := addrs.AbsProviderConfig{
+				Provider: regaddr.Provider{
+					Type:      addrs.MustParseProviderPart("test"),
+					Namespace: "opentofu",
+					Hostname:  addrs.DefaultProviderRegistryHost,
+				},
+				Module: addrs.RootModule,
+			}
+
+			state := states.BuildState(
+				func(s *states.SyncState) {
+					s.SetResourceProvider(oldAddr.ContainingResource(), providerAddr1)
+					s.SetResourceInstanceCurrent(oldAddr, &states.ResourceInstanceObjectSrc{
+						Status:    states.ObjectReady,
+						AttrsJSON: tt.attrsJSON,
+					}, providerAddr1, addrs.NoKey)
+				})
+
+			provider1 := &MockProvider{
+				// Old provider, saved in state as the previous provider address
+				GetProviderSchemaResponse: &providers.GetProviderSchemaResponse{
+					ResourceTypes: map[string]providers.Schema{
+						tt.resType: tt.schema,
+					},
+				},
+			}
+
+			provider2 := &MockProvider{
+				// New provider has identical schema; we register it with a new address, but same provider name
+				GetProviderSchemaResponse: &providers.GetProviderSchemaResponse{
+					ResourceTypes: map[string]providers.Schema{
+						tt.resType: tt.schema,
+					},
+				},
+			}
+
+			providerFactory := map[addrs.Provider]providers.Factory{
+				providerAddr1.Provider: testProviderFuncFixed(provider1),
+				providerAddr2.Provider: testProviderFuncFixed(provider2),
+			}
+
+			ctx := testContext2(t, &ContextOpts{
+				Plugins: plugins.NewLibrary(providerFactory, nil),
+			})
+
+			_, diags := ctx.Plan(context.Background(), m, state, &PlanOpts{
+				Mode: plans.NormalMode,
+			})
+
+			if !provider2.MoveResourceStateCalled {
+				// We want the provider to move to the other state
+				t.Fatal("expected a call to MoveResourceState, but none occurred")
+			}
+
+			assertNoErrors(t, diags)
+		})
+	}
+}
 
 func TestContext2Plan_movedResourceCollision(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureMoved)
+
 	addrNoKey := mustResourceInstanceAddr("test_object.a")
 	addrZeroKey := mustResourceInstanceAddr("test_object.a[0]")
 	m := testModuleInline(t, map[string]string{
@@ -1888,6 +2154,8 @@ OpenTofu has planned to destroy these objects. If OpenTofu's proposed changes ar
 }
 
 func TestContext2Plan_movedResourceCollisionDestroy(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureMoved)
+
 	// This is like TestContext2Plan_movedResourceCollision but intended to
 	// ensure we still produce the expected warning (and produce it only once)
 	// when we're creating a destroy plan, rather than a normal plan.
@@ -2006,6 +2274,7 @@ OpenTofu has planned to destroy these objects. If OpenTofu's proposed changes ar
 }
 
 func TestContext2Plan_movedResourceUntargeted(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureMoved)
 	addrA := mustResourceInstanceAddr("test_object.a")
 	addrB := mustResourceInstanceAddr("test_object.b")
 	m := testModuleInline(t, map[string]string{
@@ -2356,6 +2625,8 @@ The -target and -exclude options are not for routine use, and are provided only 
 }
 
 func TestContext2Plan_untargetedResourceSchemaChange(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureTarget)
+
 	// an untargeted resource which requires a schema migration should not
 	// block planning due external changes in the plan.
 	addrA := mustResourceInstanceAddr("test_object.a")
@@ -2419,6 +2690,8 @@ resource "test_object" "b" {
 }
 
 func TestContext2Plan_excludedResourceSchemaChange(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureTarget)
+
 	// an excluded resource which requires a schema migration should not
 	// block planning due external changes in the plan.
 	addrA := mustResourceInstanceAddr("test_object.a")
@@ -2483,6 +2756,7 @@ resource "test_object" "b" {
 }
 
 func TestContext2Plan_movedResourceRefreshOnly(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureMoved)
 	addrA := mustResourceInstanceAddr("test_object.a")
 	addrB := mustResourceInstanceAddr("test_object.b")
 	m := testModuleInline(t, map[string]string{
@@ -2555,6 +2829,8 @@ func TestContext2Plan_movedResourceRefreshOnly(t *testing.T) {
 }
 
 func TestContext2Plan_refreshOnlyMode(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureRefresh)
+
 	addr := mustResourceInstanceAddr("test_object.a")
 
 	// The configuration, the prior state, and the refresh result intentionally
@@ -2685,94 +2961,6 @@ func TestContext2Plan_refreshOnlyMode(t *testing.T) {
 	}
 }
 
-func TestContext2Plan_refreshOnlyMode_ephemeral(t *testing.T) {
-	addr := mustResourceInstanceAddr("ephemeral.test_object.a")
-
-	// The configuration, the prior state, and the refresh result intentionally
-	// have different values for "test_string" so we can observe that the
-	// refresh took effect but the configuration change wasn't considered.
-	m := testModuleInline(t, map[string]string{
-		"main.tf": `
-			ephemeral "test_object" "a" {
-				arg = "after"
-			}
-		`,
-	})
-	state := states.NewState()
-
-	p := simpleMockProvider()
-	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
-		Provider: providers.Schema{Block: simpleTestSchema()},
-		EphemeralResources: map[string]providers.Schema{
-			"test_object": {
-				Block: &configschema.Block{
-					Attributes: map[string]*configschema.Attribute{
-						"arg": {Type: cty.String, Optional: true},
-					},
-				},
-			},
-		},
-	}
-	p.OpenEphemeralResourceFn = func(req providers.OpenEphemeralResourceRequest) providers.OpenEphemeralResourceResponse {
-		newVal, err := cty.Transform(req.Config, func(path cty.Path, v cty.Value) (cty.Value, error) {
-			if len(path) == 1 && path[0] == (cty.GetAttrStep{Name: "arg"}) {
-				return cty.StringVal("current"), nil
-			}
-			return v, nil
-		})
-		if err != nil {
-			// shouldn't get here
-			t.Fatalf("OpenResourceFn transform failed")
-			return providers.OpenEphemeralResourceResponse{}
-		}
-		return providers.OpenEphemeralResourceResponse{
-			Result: newVal,
-		}
-	}
-
-	ctx := testContext2(t, &ContextOpts{
-		Plugins: plugins.NewLibrary(map[addrs.Provider]providers.Factory{
-			addrs.NewDefaultProvider("test"): testProviderFuncFixed(p),
-		}, nil),
-	})
-
-	plan, diags := ctx.Plan(context.Background(), m, state, &PlanOpts{
-		Mode: plans.RefreshOnlyMode,
-	})
-	if diags.HasErrors() {
-		t.Fatalf("unexpected errors\n%s", diags.Err().Error())
-	}
-
-	if !p.OpenEphemeralResourceCalled {
-		t.Errorf("Provider's OpenEphemeralResource wasn't called; should've been")
-	}
-
-	if got, want := len(plan.Changes.Resources), 1; got != want {
-		t.Fatalf("expected to have exactly %d resource but got %d", want, got)
-	}
-	if gotResAddr := plan.Changes.Resources[0].Addr; !gotResAddr.Equal(addr) {
-		t.Errorf("plan contains one resource and that's NOT an ephemeral as expected; instead, got %s", gotResAddr)
-	}
-	if got, want := len(plan.Changes.ActionableResources()), 0; got != want {
-		t.Errorf(
-			"changes.ActionableResources() returned more than %d resources, meaning that didn't exclude ephemeral resources. Instead returned %d\nChanges:\n%s",
-			want,
-			got,
-			spew.Sdump(plan.Changes.Resources),
-		)
-	}
-
-	if instState := plan.PlannedState.ResourceInstance(addr); instState == nil {
-		t.Errorf("%s has no planned state, but it should have since it's needed to build the apply graph correctly", addr)
-	} else {
-		want := `{"arg":"current"}`
-		got := string(instState.Current.AttrsJSON)
-		if diff := cmp.Diff(want, got); diff != "" {
-			t.Fatalf("unexpected attributes for the planned ephemeral:\n%s", diff)
-		}
-	}
-}
-
 func TestContext2Plan_refreshOnlyMode_deposed(t *testing.T) {
 	addr := mustResourceInstanceAddr("test_object.a")
 	deposedKey := states.DeposedKey("byebye")
@@ -2852,6 +3040,7 @@ func TestContext2Plan_refreshOnlyMode_deposed(t *testing.T) {
 		}, nil),
 	})
 
+	SkipExperimental(t, ExperimentalFeatureRefreshOnly)
 	plan, diags := ctx.Plan(context.Background(), m, state, &PlanOpts{
 		Mode: plans.RefreshOnlyMode,
 	})
@@ -2915,6 +3104,8 @@ func TestContext2Plan_refreshOnlyMode_deposed(t *testing.T) {
 }
 
 func TestContext2Plan_refreshOnlyMode_orphan(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureRefresh)
+
 	addr := mustAbsResourceAddr("test_object.a")
 
 	// The configuration, the prior state, and the refresh result intentionally
@@ -3057,6 +3248,8 @@ func TestContext2Plan_refreshOnlyMode_orphan(t *testing.T) {
 }
 
 func TestContext2Plan_invalidSensitiveModuleOutput(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureSensitivity)
+
 	m := testModuleInline(t, map[string]string{
 		"child/main.tf": `
 output "out" {
@@ -3197,6 +3390,8 @@ data "test_data_source" "foo" {
 }
 
 func TestContext2Plan_forceReplace(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureForceReplace)
+
 	addrA := mustResourceInstanceAddr("test_object.a")
 	addrB := mustResourceInstanceAddr("test_object.b")
 	m := testModuleInline(t, map[string]string{
@@ -3251,6 +3446,13 @@ func TestContext2Plan_forceReplace(t *testing.T) {
 	})
 	t.Run(addrB.String(), func(t *testing.T) {
 		instPlan := plan.Changes.ResourceInstance(addrB)
+		if experimentalRuntimeEnabled() {
+			if instPlan != nil {
+				t.Fatalf("expected no plan for %s at all", addrB)
+			}
+			// New engine does not generate NoOps
+			return
+		}
 		if instPlan == nil {
 			t.Fatalf("no plan for %s at all", addrB)
 		}
@@ -3265,6 +3467,8 @@ func TestContext2Plan_forceReplace(t *testing.T) {
 }
 
 func TestContext2Plan_forceReplaceIncompleteAddr(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureForceReplace)
+
 	addr0 := mustResourceInstanceAddr("test_object.a[0]")
 	addr1 := mustResourceInstanceAddr("test_object.a[1]")
 	addrBare := mustResourceInstanceAddr("test_object.a")
@@ -3313,6 +3517,14 @@ func TestContext2Plan_forceReplaceIncompleteAddr(t *testing.T) {
 
 	t.Run(addr0.String(), func(t *testing.T) {
 		instPlan := plan.Changes.ResourceInstance(addr0)
+		if experimentalRuntimeEnabled() {
+			if instPlan != nil {
+				t.Fatalf("expected no plan for %s at all", addr0)
+			}
+			// New engine does not generate NoOps
+			return
+		}
+
 		if instPlan == nil {
 			t.Fatalf("no plan for %s at all", addr0)
 		}
@@ -3326,6 +3538,13 @@ func TestContext2Plan_forceReplaceIncompleteAddr(t *testing.T) {
 	})
 	t.Run(addr1.String(), func(t *testing.T) {
 		instPlan := plan.Changes.ResourceInstance(addr1)
+		if experimentalRuntimeEnabled() {
+			if instPlan != nil {
+				t.Fatalf("expected no plan for %s at all", addr1)
+			}
+			// New engine does not generate NoOps
+			return
+		}
 		if instPlan == nil {
 			t.Fatalf("no plan for %s at all", addr1)
 		}
@@ -3339,9 +3558,87 @@ func TestContext2Plan_forceReplaceIncompleteAddr(t *testing.T) {
 	})
 }
 
+// This TestContext2Plan_forceReplaceIncompleteAddr_multipleResources is a test case for
+// https://github.com/opentofu/opentofu/issues/4368
+// I've added all the required test cases that are needed to verify the fix for the issue.
+// This will cover the scope of issue #4368
+func TestContext2Plan_forceReplaceIncompleteAddr_multipleResources(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureForceReplace)
+	rootAddr0 := mustResourceInstanceAddr("test_object.foo[0]")
+	rootAddr1 := mustResourceInstanceAddr("test_object.foo[1]")
+	childAddr0 := mustResourceInstanceAddr("module.child.test_object.foo[0]")
+	childAddr1 := mustResourceInstanceAddr("module.child.test_object.foo[1]")
+	childBare := mustResourceInstanceAddr("module.child.test_object.foo")
+
+	m := testModuleInline(t, map[string]string{
+		"main.tf": `
+		resource "test_object" "foo" {
+			count = 2
+		}
+		module "child" {
+			source = "./child"
+		}
+	`,
+		"child/child.tf": `
+			resource "test_object" "foo" {
+				count = 2
+			}
+		`,
+	})
+
+	state := states.BuildState(func(s *states.SyncState) {
+		s.SetResourceInstanceCurrent(rootAddr0, &states.ResourceInstanceObjectSrc{
+			AttrsJSON: []byte(`{}`),
+			Status:    states.ObjectReady,
+		}, mustProviderConfig(`provider["registry.opentofu.org/hashicorp/test"]`), addrs.NoKey)
+		s.SetResourceInstanceCurrent(rootAddr1, &states.ResourceInstanceObjectSrc{
+			AttrsJSON: []byte(`{}`),
+			Status:    states.ObjectReady,
+		}, mustProviderConfig(`provider["registry.opentofu.org/hashicorp/test"]`), addrs.NoKey)
+		s.SetResourceInstanceCurrent(childAddr0, &states.ResourceInstanceObjectSrc{
+			AttrsJSON: []byte(`{}`),
+			Status:    states.ObjectReady,
+		}, mustProviderConfig(`provider["registry.opentofu.org/hashicorp/test"]`), addrs.NoKey)
+		s.SetResourceInstanceCurrent(childAddr1, &states.ResourceInstanceObjectSrc{
+			AttrsJSON: []byte(`{}`),
+			Status:    states.ObjectReady,
+		}, mustProviderConfig(`provider["registry.opentofu.org/hashicorp/test"]`), addrs.NoKey)
+	})
+	p := simpleMockProvider()
+	ctx := testContext2(t, &ContextOpts{
+		Plugins: plugins.NewLibrary(map[addrs.Provider]providers.Factory{
+			addrs.NewDefaultProvider("test"): testProviderFuncFixed(p),
+		}, nil),
+	})
+	_, diags := ctx.Plan(context.Background(), m, state, &PlanOpts{
+		Mode: plans.NormalMode,
+		ForceReplace: []addrs.AbsResourceInstance{
+			childBare,
+		},
+	})
+	if diags.HasErrors() {
+		t.Fatalf("unexpected errors\n%s", diags.Err().Error())
+	}
+	diagsErr := diags.ErrWithWarnings()
+	if diagsErr == nil {
+		t.Fatalf("no warnings were returned")
+	}
+	if got, want := diagsErr.Error(), "Incompletely-matched force-replace resource instance"; !strings.Contains(got, want) {
+		t.Errorf("missing expected warning summary\ngot:\n%s\n\nwant substring: %s", got, want)
+	}
+	if got, want := diagsErr.Error(), "Your force-replace request for module.child.test_object.foo doesn't match"; !strings.Contains(got, want) {
+		t.Errorf("missing expected warning detail for module.child.test_object.foo\ngot:\n%s\n\nwant substring: %s", got, want)
+	}
+	if got, want := diagsErr.Error(), "Your force-replace request for test_object.foo doesn't match"; strings.Contains(got, want) {
+		t.Errorf("unexpected warning detail for test_object.foo\ngot:\n%s\n\nunexpected substring: %s", got, want)
+	}
+}
+
 // Verify that adding a module instance does force existing module data sources
 // to be deferred
 func TestContext2Plan_noChangeDataSourceAddingModuleInstance(t *testing.T) {
+	SkipExperimental(t, ExperimentalBugDeclareProvider)
+
 	m := testModuleInline(t, map[string]string{
 		"main.tf": `
 locals {
@@ -3452,10 +3749,12 @@ output "output" {
 }
 
 func TestContext2Plan_moduleImplicitMove(t *testing.T) {
+	SkipExperimental(t, ExperimentalBugDeclareProvider, ExperimentalFeatureMoved)
+
 	// Modules are being moved implicitly to use the `enabled` field when nothing
 	// is declared on the block. Alternatively, they are implicitly being moved from
 	// using `enabled` as true or without declaring `enabled` to use count.
-	var tests = map[string]struct {
+	tests := map[string]struct {
 		name         string
 		expectedAddr addrs.AbsResourceInstance
 		prevAddr     addrs.AbsResourceInstance
@@ -3700,6 +3999,8 @@ func TestContext2Plan_moduleImplicitMove(t *testing.T) {
 }
 
 func TestContext2Plan_resourcePreconditionPostcondition(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureCondition)
+
 	m := testModuleInline(t, map[string]string{
 		"main.tf": `
 variable "boop" {
@@ -3989,6 +4290,8 @@ resource "test_resource" "a" {
 }
 
 func TestContext2Plan_dataSourcePreconditionPostcondition(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureCondition)
+
 	m := testModuleInline(t, map[string]string{
 		"main.tf": `
 variable "boop" {
@@ -4081,6 +4384,7 @@ resource "test_resource" "a" {
 		}
 
 		addr := mustResourceInstanceAddr("data.test_data_source.a")
+		SkipExperimental(t, ExperimentalFeatureChecks)
 		if gotResult := plan.Checks.GetObjectResult(addr); gotResult == nil {
 			t.Errorf("no check result for %s", addr)
 		} else {
@@ -4269,6 +4573,8 @@ resource "test_resource" "a" {
 }
 
 func TestContext2Plan_outputPrecondition(t *testing.T) {
+	SkipExperimental(t, ExperimentalChangeDiagWording, ExperimentalFlagUnknown)
+
 	m := testModuleInline(t, map[string]string{
 		"main.tf": `
 variable "boop" {
@@ -4388,6 +4694,8 @@ output "a" {
 }
 
 func TestContext2Plan_preconditionErrors(t *testing.T) {
+	SkipExperimental(t, ExperimentalChangeDiagWording, ExperimentalBugVariableInput)
+
 	testCases := []struct {
 		condition   string
 		wantSummary string
@@ -4470,6 +4778,7 @@ func TestContext2Plan_preconditionErrors(t *testing.T) {
 				t.Errorf("unexpected summary\ngot: %s\nwant to contain %q", got, want)
 			}
 
+			SkipExperimental(t, ExperimentalFeatureChecks)
 			for _, kv := range plan.Checks.ConfigResults.Elements() {
 				// All these are configuration or evaluation errors
 				if kv.Value.Status != checks.StatusError {
@@ -4481,6 +4790,8 @@ func TestContext2Plan_preconditionErrors(t *testing.T) {
 }
 
 func TestContext2Plan_preconditionSensitiveValues(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureCondition)
+
 	p := testProvider("test")
 	ctx := testContext2(t, &ContextOpts{
 		Plugins: plugins.NewLibrary(map[addrs.Provider]providers.Factory{
@@ -4540,6 +4851,8 @@ output "a" {
 }
 
 func TestContext2Plan_triggeredBy(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureReplaceTB)
+
 	type TestConfiguration struct {
 		Description         string
 		inlineConfiguration map[string]string
@@ -4784,6 +5097,16 @@ data "test_object" "a" {
 }
 
 func TestContext2Plan_applyGraphError(t *testing.T) {
+	// This test is trying to exercise the old runtime's behavior where the
+	// plan phase quietly tries to run the apply graph builder against the
+	// generated plan so we can fail earlier if the plan is wrong in a way
+	// that the apply phase would reject. It's reasonable to test that
+	// but the new runtime doesn't guarantee that yet so we'll need to first
+	// figure out exactly how our new-style planning phase will catch the
+	// situation where the plan is invalid, and then figure out how to cause
+	// that to happen for testing purposes.
+	SkipExperimental(t, ExperimentalNewStrategyNeeded)
+
 	m := testModuleInline(t, map[string]string{
 		"main.tf": `
 resource "test_object" "a" {
@@ -4845,6 +5168,8 @@ resource "test_object" "b" {
 // plan a destroy with no state where configuration could fail to evaluate
 // expansion indexes.
 func TestContext2Plan_emptyDestroy(t *testing.T) {
+	SkipExperimental(t, ExperimentalBugDeclareProvider)
+
 	m := testModuleInline(t, map[string]string{
 		"main.tf": `
 locals {
@@ -4953,6 +5278,7 @@ resource "test_object" "b" {
 		}, nil),
 	})
 
+	SkipExperimental(t, ExperimentalBugMissingProvider)
 	_, diags := ctx.Plan(context.Background(), m, state, &PlanOpts{
 		Mode: plans.NormalMode,
 	})
@@ -4962,6 +5288,8 @@ resource "test_object" "b" {
 // make sure there are no cycles with changes around a provider configured via
 // managed resources.
 func TestContext2Plan_destroyWithResourceConfiguredProvider(t *testing.T) {
+	SkipExperimental(t, ExperimentalFlagUnknown)
+
 	m := testModuleInline(t, map[string]string{
 		"main.tf": `
 resource "test_object" "a" {
@@ -4977,7 +5305,8 @@ resource "test_object" "b" {
   provider = test.other
   in = "a"
 }
-`})
+`,
+	})
 
 	testProvider := &MockProvider{
 		GetProviderSchemaResponse: &providers.GetProviderSchemaResponse{
@@ -4992,7 +5321,7 @@ resource "test_object" "b" {
 				},
 			},
 			ResourceTypes: map[string]providers.Schema{
-				"test_object": providers.Schema{
+				"test_object": {
 					Block: &configschema.Block{
 						Attributes: map[string]*configschema.Attribute{
 							"in": {
@@ -5039,6 +5368,7 @@ resource "test_object" "b" {
 }
 
 func TestContext2Plan_destroyPartialState(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureCondition)
 	m := testModuleInline(t, map[string]string{
 		"main.tf": `
 resource "test_object" "a" {
@@ -5097,7 +5427,8 @@ output "out" {
     error_message = "should not block destroy"
   }
 }
-`})
+`,
+	})
 
 	p := simpleMockProvider()
 
@@ -5141,6 +5472,7 @@ output "out" {
 }
 
 func TestContext2Plan_destroyPartialStateLocalRef(t *testing.T) {
+	SkipExperimental(t, ExperimentalBugDeclareProvider)
 	m := testModuleInline(t, map[string]string{
 		"main.tf": `
 module "already_destroyed" {
@@ -5165,7 +5497,8 @@ resource "test_object" "a" {
 output "out" {
   value = test_object.a.test_string
 }
-`})
+`,
+	})
 
 	p := simpleMockProvider()
 
@@ -5228,12 +5561,13 @@ resource "test_object" "a" {
     new   = sensitive("ignored")
   }
 }
-`})
+`,
+	})
 
 	testProvider := &MockProvider{
 		GetProviderSchemaResponse: &providers.GetProviderSchemaResponse{
 			ResourceTypes: map[string]providers.Schema{
-				"test_object": providers.Schema{
+				"test_object": {
 					Block: &configschema.Block{
 						Attributes: map[string]*configschema.Attribute{
 							"map": {
@@ -5284,6 +5618,8 @@ resource "test_object" "a" {
 }
 
 func TestContext2Plan_importResourceBasic(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureImport)
+
 	addr := mustResourceInstanceAddr("test_object.a")
 
 	type TestConfiguration struct {
@@ -5382,6 +5718,7 @@ import {
 			if got, want := instPlan.ActionReason, plans.ResourceInstanceChangeNoReason; got != want {
 				t.Errorf("wrong action reason\ngot:  %s\nwant: %s", got, want)
 			}
+			SkipExperimental(t, ExperimentalFeatureImport)
 			if instPlan.Importing.ID != "123" {
 				t.Errorf("expected import change from \"123\", got non-import change")
 			}
@@ -5404,6 +5741,8 @@ import {
 }
 
 func TestContext2Plan_importUsingProviderDefinedFunction(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureImport)
+
 	p := testProvider("aws")
 
 	p.GetProviderSchemaResponse.Functions = map[string]providers.FunctionSpec{
@@ -5462,6 +5801,8 @@ resource "aws_instance" "foo" {
 }
 
 func TestContext2Plan_importToDynamicAddress(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureImport)
+
 	type TestConfiguration struct {
 		Description         string
 		ResolvedAddress     string
@@ -5631,7 +5972,6 @@ import {
 
 	for _, configuration := range configurations {
 		t.Run(configuration.Description, func(t *testing.T) {
-
 			// Format the configuration with the import ID
 			formattedConfiguration := make(map[string]string)
 			for configFileName, configFileContent := range configuration.inlineConfiguration {
@@ -5646,10 +5986,10 @@ import {
 				GetProviderSchemaResponse: &providers.GetProviderSchemaResponse{
 					Provider: providers.Schema{Block: simpleTestSchema()},
 					ResourceTypes: map[string]providers.Schema{
-						"test_object": providers.Schema{Block: simpleTestSchema()},
+						"test_object": {Block: simpleTestSchema()},
 					},
 					DataSources: map[string]providers.Schema{
-						"test_object": providers.Schema{
+						"test_object": {
 							Block: &configschema.Block{
 								Attributes: map[string]*configschema.Attribute{
 									"test_string": {
@@ -5716,6 +6056,7 @@ import {
 				if got, want := instPlan.ActionReason, plans.ResourceInstanceChangeNoReason; got != want {
 					t.Errorf("wrong action reason\ngot:  %s\nwant: %s", got, want)
 				}
+				SkipExperimental(t, ExperimentalFeatureImport)
 				if instPlan.Importing.ID != strconv.Itoa(importId) {
 					t.Errorf("expected import change from \"%d\", got non-import change", importId)
 				}
@@ -5739,6 +6080,8 @@ import {
 }
 
 func TestContext2Plan_importToInvalidDynamicAddress(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureImport)
+
 	type TestConfiguration struct {
 		Description         string
 		expectedError       string
@@ -5851,7 +6194,7 @@ import {
 				GetProviderSchemaResponse: &providers.GetProviderSchemaResponse{
 					Provider: providers.Schema{Block: providerSchema},
 					ResourceTypes: map[string]providers.Schema{
-						"test_object": providers.Schema{Block: providerSchema},
+						"test_object": {Block: providerSchema},
 					},
 				},
 			}
@@ -5904,6 +6247,8 @@ import {
 }
 
 func TestContext2Plan_importForEach(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureImport)
+
 	type ImportResult struct {
 		ResolvedAddress string
 		ResolvedId      string
@@ -6071,6 +6416,7 @@ import {
 					if got, want := instPlan.ActionReason, plans.ResourceInstanceChangeNoReason; got != want {
 						t.Errorf("wrong action reason\ngot:  %s\nwant: %s", got, want)
 					}
+					SkipExperimental(t, ExperimentalFeatureImport)
 					if instPlan.Importing.ID != importResult.ResolvedId {
 						t.Errorf("expected import change from \"%s\", got non-import change", importResult.ResolvedId)
 					}
@@ -6089,6 +6435,8 @@ import {
 }
 
 func TestContext2Plan_importWithInvalidForEach(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureImport)
+
 	type TestConfiguration struct {
 		Description         string
 		expectedError       string
@@ -6097,7 +6445,7 @@ func TestContext2Plan_importWithInvalidForEach(t *testing.T) {
 	configurations := []TestConfiguration{
 		{
 			Description:   "for_each value is null",
-			expectedError: "Invalid import id argument: The import ID cannot be null",
+			expectedError: "Invalid import id argument: The import id cannot be null",
 			inlineConfiguration: map[string]string{
 				"main.tf": `
 locals {
@@ -6243,7 +6591,7 @@ import {
 		},
 		{
 			Description:   "for_each value is sensitive",
-			expectedError: "Invalid import id argument: The import ID cannot be sensitive.",
+			expectedError: "Invalid import id argument: The import id cannot be sensitive.",
 			inlineConfiguration: map[string]string{
 				"main.tf": `
 locals {
@@ -6338,7 +6686,7 @@ import {
 				GetProviderSchemaResponse: &providers.GetProviderSchemaResponse{
 					Provider: providers.Schema{Block: providerSchema},
 					ResourceTypes: map[string]providers.Schema{
-						"test_object": providers.Schema{Block: providerSchema},
+						"test_object": {Block: providerSchema},
 					},
 				},
 			}
@@ -6391,6 +6739,8 @@ import {
 }
 
 func TestContext2Plan_importResourceAlreadyInState(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureImport)
+
 	addr := mustResourceInstanceAddr("test_object.a")
 	m := testModuleInline(t, map[string]string{
 		"main.tf": `
@@ -6469,6 +6819,8 @@ import {
 }
 
 func TestContext2Plan_importResourceUpdate(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureImport)
+
 	addr := mustResourceInstanceAddr("test_object.a")
 	m := testModuleInline(t, map[string]string{
 		"main.tf": `
@@ -6528,6 +6880,7 @@ import {
 		if got, want := instPlan.ActionReason, plans.ResourceInstanceChangeNoReason; got != want {
 			t.Errorf("wrong action reason\ngot:  %s\nwant: %s", got, want)
 		}
+		SkipExperimental(t, ExperimentalFeatureImport)
 		if instPlan.Importing.ID != "123" {
 			t.Errorf("expected import change from \"123\", got non-import change")
 		}
@@ -6535,6 +6888,8 @@ import {
 }
 
 func TestContext2Plan_importResourceReplace(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureImport)
+
 	addr := mustResourceInstanceAddr("test_object.a")
 	m := testModuleInline(t, map[string]string{
 		"main.tf": `
@@ -6596,6 +6951,7 @@ import {
 		if got, want := instPlan.Action, plans.DeleteThenCreate; got != want {
 			t.Errorf("wrong planned action\ngot:  %s\nwant: %s", got, want)
 		}
+		SkipExperimental(t, ExperimentalFeatureImport)
 		if instPlan.Importing.ID != "123" {
 			t.Errorf("expected import change from \"123\", got non-import change")
 		}
@@ -6696,6 +7052,8 @@ func TestContext2Plan_importIdVariable(t *testing.T) {
 }
 
 func TestContext2Plan_importIdReference(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureImport)
+
 	p := testProvider("aws")
 	m := testModule(t, "import-id-reference")
 	ctx := testContext2(t, &ContextOpts{
@@ -6725,6 +7083,127 @@ func TestContext2Plan_importIdReference(t *testing.T) {
 	})
 	if diags.HasErrors() {
 		t.Fatalf("unexpected errors: %s", diags.Err())
+	}
+}
+
+func TestContext2Plan_importWithIdentityExpression(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureImport)
+
+	p := testProvider("test")
+	m := testModuleInline(t, map[string]string{
+		"main.tf": `
+resource "test_instance" "foo" {
+}
+
+import {
+  to = test_instance.foo
+  identity = {
+    name   = "my-resource"
+    region = "us-west-2"
+  }
+}
+`,
+	})
+
+	ctx := testContext2(t, &ContextOpts{
+		Plugins: plugins.NewLibrary(map[addrs.Provider]providers.Factory{
+			addrs.NewDefaultProvider("test"): testProviderFuncFixed(p),
+		}, nil),
+	})
+
+	identitySchema := providers.ResourceIdentitySchema{
+		Version: 1,
+		Body: &configschema.Object{
+			Attributes: map[string]*configschema.Attribute{
+				"name":   {Type: cty.String, Required: true},
+				"region": {Type: cty.String, Required: true},
+			},
+			Nesting: configschema.NestingSingle,
+		},
+	}
+
+	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
+		ResourceTypes: map[string]providers.Schema{
+			"test_instance": {
+				Block: &configschema.Block{
+					Attributes: map[string]*configschema.Attribute{
+						"id":     {Type: cty.String, Computed: true},
+						"name":   {Type: cty.String, Optional: true},
+						"region": {Type: cty.String, Optional: true},
+					},
+				},
+				IdentitySchema:        identitySchema.Body,
+				IdentitySchemaVersion: identitySchema.Version,
+			},
+		},
+	}
+
+	// Capture the import request to verify identity was passed correctly
+	var capturedImportRequest providers.ImportResourceStateRequest
+
+	// ImportResourceState should receive the identity
+	p.ImportResourceStateFn = func(req providers.ImportResourceStateRequest) providers.ImportResourceStateResponse {
+		capturedImportRequest = req
+
+		return providers.ImportResourceStateResponse{
+			ImportedResources: []providers.ImportedResource{
+				{
+					TypeName: "test_instance",
+					State: cty.ObjectVal(map[string]cty.Value{
+						"id":     cty.StringVal("imported-123"),
+						"name":   cty.StringVal("my-resource"),
+						"region": cty.StringVal("us-west-2"),
+					}),
+				},
+			},
+		}
+	}
+
+	plan, diags := ctx.Plan(t.Context(), m, states.NewState(), &PlanOpts{})
+
+	if diags.HasErrors() {
+		t.Fatalf("unexpected errors: %s", diags.Err())
+	}
+
+	if !p.ImportResourceStateCalled {
+		t.Fatal("ImportResourceState should have been called")
+	}
+
+	if capturedImportRequest.Target.ID != "" {
+		t.Errorf("expected ID to be empty for identity-based import, got %q", capturedImportRequest.Target.ID)
+	}
+
+	if capturedImportRequest.Target.Identity.IsNull() {
+		t.Fatal("expected Identity to be set for identity-based import")
+	}
+
+	expectedIdentity := cty.ObjectVal(map[string]cty.Value{
+		"name":   cty.StringVal("my-resource"),
+		"region": cty.StringVal("us-west-2"),
+	})
+
+	if !capturedImportRequest.Target.Identity.RawEquals(expectedIdentity) {
+		t.Errorf("unexpected identity:\ngot:  %#v\nwant: %#v", capturedImportRequest.Target.Identity, expectedIdentity)
+	}
+
+	if len(plan.Changes.Resources) == 0 {
+		t.Fatal("expected import to create resource changes")
+	}
+
+	// there should be one change, and that should be the import!
+	first := plan.Changes.Resources[0]
+	if first.Importing == nil {
+		t.Fatal("expected resource change to be an import")
+	}
+
+	identityType := identitySchema.Body.ImpliedType()
+	decodedIdentity, err := first.Importing.Identity.Decode(identityType)
+	if err != nil {
+		t.Fatalf("failed to decode importing identity: %s", err)
+	}
+
+	if !decodedIdentity.RawEquals(expectedIdentity) {
+		t.Errorf("unexpected imported identity:\ngot:  %#v\nwant: %#v", decodedIdentity, expectedIdentity)
 	}
 }
 
@@ -6856,6 +7335,8 @@ func TestContext2Plan_importIdModule(t *testing.T) {
 }
 
 func TestContext2Plan_importIdInvalidNull(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureImport)
+
 	p := testProvider("test")
 	m := testModule(t, "import-id-invalid-null")
 	ctx := testContext2(t, &ContextOpts{
@@ -6874,12 +7355,14 @@ func TestContext2Plan_importIdInvalidNull(t *testing.T) {
 	if !diags.HasErrors() {
 		t.Fatal("succeeded; want errors")
 	}
-	if got, want := diags.Err().Error(), "The import ID cannot be null"; !strings.Contains(got, want) {
+	if got, want := diags.Err().Error(), "The import id cannot be null"; !strings.Contains(got, want) {
 		t.Fatalf("wrong error:\ngot:  %s\nwant: message containing %q", got, want)
 	}
 }
 
 func TestContext2Plan_importIdInvalidUnknown(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureImport)
+
 	p := testProvider("test")
 	m := testModule(t, "import-id-invalid-unknown")
 	ctx := testContext2(t, &ContextOpts{
@@ -6927,6 +7410,8 @@ func TestContext2Plan_importIdInvalidUnknown(t *testing.T) {
 }
 
 func TestContext2Plan_importIntoModuleWithGeneratedConfig(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureImport)
+
 	m := testModuleInline(t, map[string]string{
 		"main.tf": `
 import {
@@ -7011,6 +7496,8 @@ resource "test_object" "a" {
 }
 
 func TestContext2Plan_importIntoNonExistentConfiguration(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureImport)
+
 	type TestConfiguration struct {
 		Description         string
 		inlineConfiguration map[string]string
@@ -7182,6 +7669,8 @@ resource "test_object" "a" {
 }
 
 func TestContext2Plan_importDuplication(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureImport)
+
 	type TestConfiguration struct {
 		Description         string
 		inlineConfiguration map[string]string
@@ -7296,6 +7785,8 @@ import {
 }
 
 func TestContext2Plan_importResourceConfigGen(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureImport)
+
 	addr := mustResourceInstanceAddr("test_object.a")
 	m := testModuleInline(t, map[string]string{
 		"main.tf": `
@@ -7373,6 +7864,8 @@ import {
 }
 
 func TestContext2Plan_importResourceConfigGenWithAlias(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureImport)
+
 	addr := mustResourceInstanceAddr("test_object.a")
 	m := testModuleInline(t, map[string]string{
 		"main.tf": `
@@ -7456,6 +7949,8 @@ import {
 }
 
 func TestContext2Plan_importResourceConfigGenValidation(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureImport)
+
 	type TestConfiguration struct {
 		Description         string
 		inlineConfiguration map[string]string
@@ -7699,6 +8194,8 @@ resource "test_object" "a" {
 }
 
 func TestContext2Plan_importResourceConfigGenExpandedResource(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureImport)
+
 	m := testModuleInline(t, map[string]string{
 		"main.tf": `
 import {
@@ -7744,6 +8241,8 @@ import {
 
 // config generation still succeeds even when planning fails
 func TestContext2Plan_importResourceConfigGenWithError(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureImport)
+
 	addr := mustResourceInstanceAddr("test_object.a")
 	m := testModuleInline(t, map[string]string{
 		"main.tf": `
@@ -7810,6 +8309,13 @@ import {
 }
 
 func TestContext2Plan_providerForEachWithOrphanResourceInstanceNotUsingForEach(t *testing.T) {
+	// This currently fails in the new runtime because it doesn't have the
+	// special check for the situation where prior state has a resource instance
+	// belonging to a provider instance that isn't in the latest configuration.
+	// It just treats it as a general provider initialization failure:
+	//    Cannot plan test_thing.a["orphaned"] because its associated provider instance provider["terraform.io/builtin/test"].multi cannot initialize.
+	SkipExperimental(t, ExperimentalBugMissingProvider, ExperimentalChangeDiagWording)
+
 	// This test is to cover the bug reported in this issue:
 	//    https://github.com/opentofu/opentofu/issues/2334
 	//
@@ -7892,6 +8398,8 @@ func TestContext2Plan_providerForEachWithOrphanResourceInstanceNotUsingForEach(t
 }
 
 func TestContext2Plan_plannedState(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeaturePlannedState)
+
 	addr := mustResourceInstanceAddr("test_object.a")
 	m := testModuleInline(t, map[string]string{
 		"main.tf": `
@@ -7929,7 +8437,7 @@ locals {
 		t.Errorf("expected no resources in the state but found %d", len(module.LocalValues))
 	}
 
-	if plan == nil {
+	if plan == nil || plan.PlannedState == nil {
 		t.Fatal("plan returned nil result; expected a non-nil plan marked as errored")
 	}
 
@@ -7947,6 +8455,8 @@ locals {
 }
 
 func TestContext2Plan_removedResourceBasic(t *testing.T) {
+	SkipExperimental(t, ExperimentalBugDeclareProvider, ExperimentalFeatureRemoved)
+
 	desposedKey := states.DeposedKey("deposed")
 	addr := mustResourceInstanceAddr("test_object.a")
 	m := testModuleInline(t, map[string]string{
@@ -8028,6 +8538,8 @@ func TestContext2Plan_removedResourceBasic(t *testing.T) {
 }
 
 func TestContext2Plan_removedModuleBasic(t *testing.T) {
+	SkipExperimental(t, ExperimentalBugDeclareProvider, ExperimentalFeatureRemoved)
+
 	desposedKey := states.DeposedKey("deposed")
 	addr := mustResourceInstanceAddr("module.mod.test_object.a")
 	m := testModuleInline(t, map[string]string{
@@ -8109,6 +8621,8 @@ func TestContext2Plan_removedModuleBasic(t *testing.T) {
 }
 
 func TestContext2Plan_removedModuleForgetsAllInstances(t *testing.T) {
+	SkipExperimental(t, ExperimentalBugDeclareProvider, ExperimentalFeatureRemoved)
+
 	addrFirst := mustResourceInstanceAddr("module.mod[0].test_object.a")
 	addrSecond := mustResourceInstanceAddr("module.mod[1].test_object.a")
 
@@ -8175,6 +8689,8 @@ func TestContext2Plan_removedModuleForgetsAllInstances(t *testing.T) {
 }
 
 func TestContext2Plan_removedResourceForgetsAllInstances(t *testing.T) {
+	SkipExperimental(t, ExperimentalBugDeclareProvider, ExperimentalFeatureRemoved)
+
 	addrFirst := mustResourceInstanceAddr("test_object.a[0]")
 	addrSecond := mustResourceInstanceAddr("test_object.a[1]")
 
@@ -8241,6 +8757,8 @@ func TestContext2Plan_removedResourceForgetsAllInstances(t *testing.T) {
 }
 
 func TestContext2Plan_removedResourceInChildModuleFromParentModule(t *testing.T) {
+	SkipExperimental(t, ExperimentalBugDeclareProvider, ExperimentalFeatureRemoved)
+
 	addr := mustResourceInstanceAddr("module.mod.test_object.a")
 	m := testModuleInline(t, map[string]string{
 		"main.tf": `
@@ -8303,6 +8821,8 @@ func TestContext2Plan_removedResourceInChildModuleFromParentModule(t *testing.T)
 }
 
 func TestContext2Plan_removedResourceInChildModuleFromChildModule(t *testing.T) {
+	SkipExperimental(t, ExperimentalBugDeclareProvider, ExperimentalFeatureRemoved)
+
 	addr := mustResourceInstanceAddr("module.mod.test_object.a")
 	m := testModuleInline(t, map[string]string{
 		"main.tf": `
@@ -8365,6 +8885,8 @@ func TestContext2Plan_removedResourceInChildModuleFromChildModule(t *testing.T) 
 }
 
 func TestContext2Plan_removedResourceInGrandchildModuleFromRootModule(t *testing.T) {
+	SkipExperimental(t, ExperimentalBugDeclareProvider, ExperimentalFeatureRemoved)
+
 	addr := mustResourceInstanceAddr("module.child.module.grandchild.test_object.a")
 	m := testModuleInline(t, map[string]string{
 		"main.tf": `
@@ -8428,6 +8950,8 @@ func TestContext2Plan_removedResourceInGrandchildModuleFromRootModule(t *testing
 }
 
 func TestContext2Plan_removedChildModuleForgetsResourceInGrandchildModule(t *testing.T) {
+	SkipExperimental(t, ExperimentalBugDeclareProvider, ExperimentalFeatureRemoved)
+
 	addr := mustResourceInstanceAddr("module.child.module.grandchild.test_object.a")
 	m := testModuleInline(t, map[string]string{
 		"main.tf": `
@@ -8491,6 +9015,8 @@ func TestContext2Plan_removedChildModuleForgetsResourceInGrandchildModule(t *tes
 }
 
 func TestContext2Plan_movedAndRemovedResourceAtTheSameTime(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureMoved, ExperimentalFeatureRemoved)
+
 	// This is the only scenario where the "moved" and "removed" blocks can
 	// coexist while referencing the same resource. In this case, the "moved" logic
 	// will run first, trying to move the resource to a non-existing target.
@@ -8707,6 +9233,8 @@ func TestContext2Plan_removedModuleButModuleBlockStillExists(t *testing.T) {
 }
 
 func TestContext2Plan_importResourceWithSensitiveDataSource(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureImport)
+
 	addr := mustResourceInstanceAddr("test_object.b")
 	m := testModuleInline(t, map[string]string{
 		"main.tf": `
@@ -8815,6 +9343,7 @@ func TestContext2Plan_importResourceWithSensitiveDataSource(t *testing.T) {
 }
 
 func TestContext2Plan_insufficient_block(t *testing.T) {
+	SkipExperimental(t, ExperimentalFlagUnknown)
 	type testcase struct {
 		filename string
 		start    hcl.Pos
@@ -8872,16 +9401,17 @@ func TestContext2Plan_insufficient_block(t *testing.T) {
 }
 
 // Ensure that running plan on a configuration with ephemeral resources,
-// the generated plan contains the expected changes
-func TestContext2Plan_ephemeralResourceChangesGenerated(t *testing.T) {
+// the plan contains no changes for the ephemerals.
+// This test has been repurposed during #3799.
+func TestContext2Plan_noEphemeralResourceChangesGenerated(t *testing.T) {
 	m := testModuleInline(t, map[string]string{
 		"main.tf": `
 ephemeral "test_ephemeral_resource" "a" {
 }
 `,
 	})
-	testProvider := testProvider("test")
-	testProvider.OpenEphemeralResourceResponse = &providers.OpenEphemeralResourceResponse{
+	p := testProvider("test")
+	p.OpenEphemeralResourceResponse = &providers.OpenEphemeralResourceResponse{
 		Result: cty.ObjectVal(map[string]cty.Value{
 			"id":     cty.StringVal("id val"),
 			"secret": cty.StringVal("val"),
@@ -8893,49 +9423,27 @@ ephemeral "test_ephemeral_resource" "a" {
 
 	ctx := testContext2(t, &ContextOpts{
 		Plugins: plugins.NewLibrary(map[addrs.Provider]providers.Factory{
-			addrs.NewDefaultProvider("test"): testProviderFuncFixed(testProvider),
+			addrs.NewDefaultProvider("test"): testProviderFuncFixed(p),
 		}, nil),
 	})
 
-	plan, diags := ctx.Plan(context.Background(), m, state, DefaultPlanOpts)
-	if diags.HasErrors() {
-		t.Fatalf("unexpected plan error: %s", diags)
-	}
-	if plan.Changes == nil {
-		t.Fatalf("expected to have some changes but got none")
-	}
-	if got, want := len(plan.Changes.Resources), 1; got != want {
-		t.Fatalf("expected to have %d changes but got %d", want, got)
-	}
-	got := plan.Changes.Resources[0]
-	addr := mustResourceInstanceAddr("ephemeral.test_ephemeral_resource.a")
-	schema := testProvider.ProviderSchema().EphemeralTypes[addr.Resource.Resource.Type]
-	objTy := schema.ImpliedType()
-	priorVal := cty.NullVal(objTy)
-	beforeVal, err := plans.NewDynamicValue(priorVal, objTy)
-	if err != nil {
-		t.Fatalf("unexpected error creating before val: %s", err)
-	}
-	afterVal, err := plans.NewDynamicValue(cty.ObjectVal(map[string]cty.Value{
-		"id":     cty.StringVal("id val"),
-		"secret": cty.StringVal("val"),
-		"input":  cty.NullVal(cty.String),
-	}), objTy)
-	if err != nil {
-		t.Fatalf("unexpected error creating after val: %s", err)
-	}
-	want := &plans.ResourceInstanceChangeSrc{
-		Addr:         addr,
-		PrevRunAddr:  addr,
-		ProviderAddr: mustProviderConfig(`provider["registry.opentofu.org/hashicorp/test"]`),
-		ChangeSrc: plans.ChangeSrc{
-			Action: plans.Open,
-			Before: beforeVal,
-			After:  afterVal,
-		},
-	}
-	if diff := cmp.Diff(want, got); diff != "" {
-		t.Fatalf("unexpected diff in the ephemeral resource recorded change:\n%s", diff)
+	for _, mode := range []plans.Mode{plans.NormalMode, plans.RefreshOnlyMode} {
+		t.Run(mode.String(), func(t *testing.T) {
+			if mode == plans.RefreshOnlyMode {
+				SkipExperimental(t, ExperimentalFeatureRefreshOnly)
+			}
+			plan, diags := ctx.Plan(context.Background(), m, state, &PlanOpts{Mode: mode})
+			if diags.HasErrors() {
+				t.Fatalf("unexpected plan error: %s", diags)
+			}
+			if !p.OpenEphemeralResourceCalled {
+				t.Errorf("Provider's OpenEphemeralResource wasn't called; should've been")
+			}
+			defer func() { p.OpenEphemeralResourceCalled = false }()
+			if got, want := len(plan.Changes.Resources), 0; got != want {
+				t.Fatalf("expected to have %d changes but got %d", want, got)
+			}
+		})
 	}
 }
 
@@ -8994,6 +9502,95 @@ variable "ephemeral_var" {
 	}
 }
 
+// This is to ensure that the panic encountered during closing ephemeral resources does not occur again.
+// panic: send on closed channel
+//
+//	github.com/opentofu/opentofu/internal/shared.OpenEphemeralResourceInstance.func2()
+//
+// Even with the current test setup, the error can be caught only intermittently, so if you want to
+// check it, you have to run it several times.
+// The assertions of this test are quite permissive, because we are not interested in that specifically,
+// but the focus is more on the panic. If the logic panics, the test will fail.
+func TestContext2Plan_ephemeralClosingTimeout(t *testing.T) {
+	oldCloseTimeout := shared.EphemeralResourceCloseTimeout
+	defer func() {
+		shared.EphemeralResourceCloseTimeout = oldCloseTimeout
+	}()
+	shared.EphemeralResourceCloseTimeout = 1 * time.Second
+
+	m := testModuleInline(t, map[string]string{
+		"main.tf": `
+ephemeral "test_ephemeral_resource" "a" {
+}
+`,
+	})
+	p := testProvider("test")
+
+	// To avoid race conditions, we perform the below checks only after the calls to the provider methods
+	// are performed.
+	callsCh := make(chan struct{}, 2)
+	doneCh := make(chan struct{})
+	go func() {
+		defer close(doneCh)
+		var i int
+		for {
+			select {
+			case <-callsCh:
+				i++
+				if i == 2 {
+					return
+				}
+			case <-t.Context().Done():
+				return
+			}
+		}
+	}()
+	p.OpenEphemeralResourceFn = func(request providers.OpenEphemeralResourceRequest) providers.OpenEphemeralResourceResponse {
+		defer func() { callsCh <- struct{}{} }()
+		return providers.OpenEphemeralResourceResponse{
+			Result: cty.ObjectVal(map[string]cty.Value{
+				"id":     cty.StringVal("id val"),
+				"secret": cty.StringVal("val"),
+				"input":  cty.NullVal(cty.String),
+			}),
+		}
+	}
+	p.CloseEphemeralResourceFn = func(request providers.CloseEphemeralResourceRequest) providers.CloseEphemeralResourceResponse {
+		defer func() { callsCh <- struct{}{} }()
+		<-time.After(shared.EphemeralResourceCloseTimeout)
+		return providers.CloseEphemeralResourceResponse{}
+	}
+
+	state := states.NewState()
+
+	ctx := testContext2(t, &ContextOpts{
+		Plugins: plugins.NewLibrary(map[addrs.Provider]providers.Factory{
+			addrs.NewDefaultProvider("test"): testProviderFuncFixed(p),
+		}, nil),
+	})
+
+	_, diags := ctx.Plan(context.Background(), m, state, &PlanOpts{Mode: plans.NormalMode})
+	if diags.HasErrors() {
+		// Because of the setup (10 seconds to close and 10 seconds the timeout), this test can fail intermittently.
+		// Therefore, in case there is a situation where it fails, we only expect one diagnostic.
+		if len(diags) != 1 || !strings.Contains(diags.Err().Error(), "Closing ephemeral resource timed out") {
+			t.Fatalf("unexpected plan error: %s", diags)
+		}
+		t.Logf("Plan failed with the expected error")
+	}
+	select {
+	case <-doneCh:
+	case <-time.After(12 * time.Second):
+		t.Fatalf("timed out while waiting for the provider calls to be performed")
+	}
+	if !p.OpenEphemeralResourceCalled {
+		t.Errorf("Provider's OpenEphemeralResource wasn't called; should've been")
+	}
+	if !p.CloseEphemeralResourceCalled {
+		t.Errorf("Provider's CloseEphemeralResource wasn't called; should've been")
+	}
+}
+
 func mockProviderWithFeaturesBlock() *MockProvider {
 	return &MockProvider{
 		GetProviderSchemaResponse: &providers.GetProviderSchemaResponse{
@@ -9031,6 +9628,8 @@ func featuresBlockTestSchema() *configschema.Block {
 // use a shared submodule containing a check block with a nested data source,
 // this should not cause a dependency cycle.
 func TestContext2Plan_moduleDependsOnWithCheck(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureDependsOn, ExperimentalBugDeclareProvider)
+
 	m := testModule(t, "plan-module-depends-on-check")
 
 	p := &MockProvider{
@@ -9075,5 +9674,57 @@ func TestContext2Plan_moduleDependsOnWithCheck(t *testing.T) {
 	_, diags := ctx.Plan(context.Background(), m, states.NewState(), DefaultPlanOpts)
 	if diags.HasErrors() {
 		t.Fatalf("unexpected errors: %s", diags.Err())
+	}
+}
+
+// TestContext2Plan_enabledOnDeprecatedModuleOutput is a regression test for
+// https://github.com/opentofu/opentofu/issues/4161
+// "panic: value is marked, so must be unmarked first in EvaluateEnabledExpression during plan"
+//
+// When a module output is marked as deprecated and that output value is used in another resource
+// lifecycle.enabled, a panic was encountered due to the value being still marked.
+func TestContext2Plan_enabledOnDeprecatedModuleOutput(t *testing.T) {
+	m := testModuleInline(t, map[string]string{
+		"mod/main.tf": `
+output "trigger" {
+  value      = true
+  deprecated = "use other"
+}`,
+		"main.tf": `
+module "m" {
+  source = "./mod"
+}
+
+resource "test_resource" "example" {
+  lifecycle {
+    enabled = module.m.trigger
+  }
+}
+`,
+	})
+
+	p := &MockProvider{
+		GetProviderSchemaResponse: &providers.GetProviderSchemaResponse{
+			Provider: providers.Schema{Block: &configschema.Block{}},
+			ResourceTypes: map[string]providers.Schema{
+				"test_resource": {Block: &configschema.Block{}},
+			},
+		},
+	}
+	ctx := testContext2(t, &ContextOpts{
+		Plugins: plugins.NewLibrary(map[addrs.Provider]providers.Factory{
+			addrs.NewDefaultProvider("test"): testProviderFuncFixed(p),
+		}, nil),
+	})
+
+	plan, diags := ctx.Plan(context.Background(), m, states.NewState(), DefaultPlanOpts)
+	if diags.HasErrors() {
+		t.Errorf("unexpected errors: %s", diags.Err())
+	}
+	if plan == nil {
+		t.Fatalf("expected a plan but got nothing")
+	}
+	if changes := len(plan.Changes.Resources); changes != 1 {
+		t.Fatalf("expected to have exactly one resource change but got %d", changes)
 	}
 }

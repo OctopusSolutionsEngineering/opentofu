@@ -7,14 +7,14 @@ package command
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log"
 	"reflect"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/hashicorp/hcl/v2"
+	"github.com/mitchellh/cli"
 	"github.com/opentofu/opentofu/internal/command/flags"
 	"github.com/opentofu/svchost"
 	"github.com/posener/complete"
@@ -33,7 +33,6 @@ import (
 	"github.com/opentofu/opentofu/internal/providercache"
 	"github.com/opentofu/opentofu/internal/states"
 	"github.com/opentofu/opentofu/internal/tfdiags"
-	"github.com/opentofu/opentofu/internal/tofu"
 	"github.com/opentofu/opentofu/internal/tofumigrate"
 	"github.com/opentofu/opentofu/internal/tracing"
 	"github.com/opentofu/opentofu/internal/tracing/traceattrs"
@@ -58,12 +57,6 @@ func (c *InitCommand) Run(rawArgs []string) int {
 	// in order to keep functional parity, we setup the view to add a new line after each diagnostic.
 	c.View.DiagsWithNewline()
 
-	// Propagate -no-color for legacy use of Ui. The remote backend and
-	// cloud package use this; it should be removed when/if they are
-	// migrated to views.
-	c.Meta.color = !common.NoColor
-	c.Meta.Color = c.Meta.color
-
 	// Parse and validate flags
 	args, closer, diags := arguments.ParseInit(rawArgs)
 	defer closer()
@@ -71,33 +64,36 @@ func (c *InitCommand) Run(rawArgs []string) int {
 	// Instantiate the view, even if there are flag errors, so that we render
 	// diagnostics according to the desired view
 	view := views.NewInit(args.ViewOptions, c.View)
-	// ... and initialise the Meta.Ui to wrap Meta.View into a new implementation
-	// that is able to print by using View abstraction and use the Meta.Ui
-	// to ask for the user input.
-	c.Meta.configureUiFromView(args.ViewOptions)
 
 	if diags.HasErrors() {
 		view.Diagnostics(diags)
-		view.HelpPrompt()
-		return 1
+		if args.ViewOptions.ViewType == arguments.ViewJSON {
+			return 1
+		}
+		return cli.RunResultHelp
 	}
 
 	// FIXME: the -input flag value is needed to initialize the backend and the
 	// operation, but there is no clear path to pass this value down, so we
 	// continue to mutate the Meta object state for now.
 	c.Meta.input = args.ViewOptions.InputEnabled
-	c.configureBackendFlags(args.Backend)
 
 	if len(args.FlagPluginPath) > 0 {
 		c.pluginPath = args.FlagPluginPath
 	}
-	c.GatherVariables(args.Vars)
+	c.Meta.variableArgs = args.Vars.All()
+	c.Meta.stateArgs = *args.State
+	c.Meta.backendArgs = *args.Backend
 
 	// This gets the current directory as full path.
 	path := c.WorkingDir.NormalizePath(c.WorkingDir.RootModuleDir())
 
 	if err := c.storePluginPath(c.pluginPath); err != nil {
-		view.Diagnostics(diags.Append(fmt.Errorf("Error saving -plugin-path values: %w", err)))
+		view.Diagnostics(diags.Append(tfdiags.Sourceless(
+			tfdiags.Error,
+			"Error saving -plugin-path values",
+			err.Error(),
+		)))
 		return 1
 	}
 
@@ -114,11 +110,23 @@ func (c *InitCommand) Run(rawArgs []string) int {
 
 		empty, err := configs.IsEmptyDir(path)
 		if err != nil {
-			view.Diagnostics(diags.Append(fmt.Errorf("Error validating destination directory: %w", err)))
+			view.Diagnostics(diags.Append(tfdiags.Sourceless(
+				tfdiags.Error,
+				"Error validating destination directory",
+				err.Error(),
+			)))
 			return 1
 		}
 		if !empty {
-			view.Diagnostics(diags.Append(errors.New(strings.TrimSpace(errInitCopyNotEmpty))))
+			view.Diagnostics(diags.Append(tfdiags.Sourceless(
+				tfdiags.Error,
+				"The working directory already contains files",
+				`The -from-module option requires an empty directory into which a copy of 
+the referenced module will be placed.
+
+To initialize the configuration already in this working directory, omit the
+-from-module option.`,
+			)))
 			return 1
 		}
 
@@ -133,7 +141,7 @@ func (c *InitCommand) Run(rawArgs []string) int {
 		))
 		defer span.End()
 
-		initDirFromModuleAbort, initDirFromModuleDiags := c.initDirFromModule(ctx, path, src, hooks)
+		initDirFromModuleAbort, initDirFromModuleDiags := c.initDirFromModule(ctx, path, src, hooks, view)
 		diags = diags.Append(initDirFromModuleDiags)
 		if initDirFromModuleAbort || initDirFromModuleDiags.HasErrors() {
 			view.Diagnostics(diags)
@@ -149,7 +157,11 @@ func (c *InitCommand) Run(rawArgs []string) int {
 	// the backend with an empty directory.
 	empty, err := configs.IsEmptyDir(path)
 	if err != nil {
-		view.Diagnostics(diags.Append(fmt.Errorf("Error checking configuration: %w", err)))
+		view.Diagnostics(diags.Append(tfdiags.Sourceless(
+			tfdiags.Error,
+			"Error checking configuration",
+			err.Error(),
+		)))
 		return 1
 	}
 	if empty {
@@ -159,16 +171,17 @@ func (c *InitCommand) Run(rawArgs []string) int {
 
 	// Load just the root module to begin backend and module initialization
 	rootModEarly, earlyConfDiags := c.loadSingleModuleWithTests(ctx, path, args.TestsDirectory)
-
-	// There may be parsing errors in config loading but these will be shown later _after_
-	// checking for core version requirement errors. Not meeting the version requirement should
-	// be the first error displayed if that is an issue, but other operations are required
-	// before being able to check core version requirements.
-	if rootModEarly == nil {
+	if earlyConfDiags.HasErrors() {
+		// Historical note: prior to OpenTofu v1.12, we took some extraordinary
+		// effort here to return any backend-related errors in preference to
+		// config loading errors about the root module. We no longer do that
+		// and instead exit early if the root module isn't at least valid enough
+		// to load, because remote operations with the "cloud" backend isn't
+		// such an important use-case for OpenTofu as it presumably is for our
+		// predecessor and so we prefer simpler control flow here.
 		view.ConfigError()
 		diags = diags.Append(earlyConfDiags)
 		view.Diagnostics(diags)
-
 		return 1
 	}
 
@@ -195,10 +208,19 @@ func (c *InitCommand) Run(rawArgs []string) int {
 	var backendOutput bool
 
 	switch {
+	case !args.FlagBackend && args.BackendFlagSet:
+		// The user explicitly passed -backend=false,
+		// so we must neither initialize a new backend nor load any
+		// previously-initialized one. Loading the previously-initialized
+		// backend would otherwise try to read (and, if encryption is
+		// configured, decrypt) the local state file, defeating the whole
+		// purpose of -backend=false and breaking workflows where the
+		// encryption key is intentionally unavailable.
+		back = nil
 	case args.FlagCloud && rootModEarly.CloudConfig != nil:
-		back, backendOutput, backDiags = c.initCloud(ctx, rootModEarly, args.FlagConfigExtra, enc, view)
+		back, backendOutput, backDiags = c.initCloud(ctx, rootModEarly, args.FlagConfigExtra, enc, view.Backend())
 	case args.FlagBackend:
-		back, backendOutput, backDiags = c.initBackend(ctx, rootModEarly, args.FlagConfigExtra, enc, view)
+		back, backendOutput, backDiags = c.initBackend(ctx, rootModEarly, args.FlagConfigExtra, enc, view.Backend())
 	default:
 		// load the previously-stored backend config
 		back, backDiags = c.Meta.backendFromState(ctx, enc.State())
@@ -216,17 +238,29 @@ func (c *InitCommand) Run(rawArgs []string) int {
 		c.ignoreRemoteVersionConflict(back)
 		workspace, err := c.Workspace(ctx)
 		if err != nil {
-			view.Diagnostics(diags.Append(fmt.Errorf("Error selecting workspace: %w", err)))
+			view.Diagnostics(diags.Append(tfdiags.Sourceless(
+				tfdiags.Error,
+				"Error selecting workspace",
+				err.Error(),
+			)))
 			return 1
 		}
 		sMgr, err := back.StateMgr(ctx, workspace)
 		if err != nil {
-			view.Diagnostics(diags.Append(fmt.Errorf("Error loading state: %s", err)))
+			view.Diagnostics(diags.Append(tfdiags.Sourceless(
+				tfdiags.Error,
+				"Error loading state",
+				err.Error(),
+			)))
 			return 1
 		}
 
 		if err := sMgr.RefreshState(context.TODO()); err != nil {
-			view.Diagnostics(diags.Append(fmt.Errorf("Error refreshing state: %s", err)))
+			view.Diagnostics(diags.Append(tfdiags.Sourceless(
+				tfdiags.Error,
+				"Error refreshing state",
+				err.Error(),
+			)))
 			return 1
 		}
 
@@ -237,6 +271,7 @@ func (c *InitCommand) Run(rawArgs []string) int {
 		modsOutput, modsAbort, modsDiags := c.getModules(ctx, path, args.TestsDirectory, rootModEarly, args.FlagUpgrade, view)
 		diags = diags.Append(modsDiags)
 		if modsAbort || modsDiags.HasErrors() {
+			tracing.SetSpanError(span, modsDiags)
 			view.Diagnostics(diags)
 			return 1
 		}
@@ -248,22 +283,9 @@ func (c *InitCommand) Run(rawArgs []string) int {
 	// With all of the modules (hopefully) installed, we can now try to load the
 	// whole configuration tree.
 	config, confDiags := c.loadConfigWithTests(ctx, path, args.TestsDirectory)
-	// configDiags will be handled after the version constraint check, since an
-	// incorrect version of tofu may be producing errors for configuration
-	// constructs added in later versions.
-
-	// Before we go further, we'll check to make sure none of the modules in
-	// the configuration declare that they don't support this OpenTofu
-	// version, so we can produce a version-related error message rather than
-	// potentially-confusing downstream errors.
-	versionDiags := tofu.CheckCoreVersionRequirements(config)
-	if versionDiags.HasErrors() {
-		view.Diagnostics(versionDiags)
-		return 1
-	}
-
-	// We've passed the core version check, now we can show errors from the
-	// configuration and backend initialization.
+	// We don't immediately handle confDiags here because we prefer to show
+	// shallow backend-related errors if there are any, before we complain
+	// about anything in nested modules.
 
 	// Now, we can check the diagnostics from the early configuration and the
 	// backend.
@@ -292,7 +314,7 @@ func (c *InitCommand) Run(rawArgs []string) int {
 	}
 
 	if cb, ok := back.(*cloud.Cloud); ok {
-		if c.RunningInAutomation {
+		if c.SystemCfg.RunningInAutomation {
 			if err := cb.AssertImportCompatible(config); err != nil {
 				diags = diags.Append(tfdiags.Sourceless(tfdiags.Error, "Compatibility error", err.Error()))
 				view.Diagnostics(diags)
@@ -336,7 +358,7 @@ func (c *InitCommand) Run(rawArgs []string) int {
 	view.Diagnostics(diags)
 	_, isCloud := back.(*cloud.Cloud)
 	view.InitSuccess(isCloud)
-	if !c.RunningInAutomation {
+	if !c.SystemCfg.RunningInAutomation {
 		// If we're not running in an automation wrapper, give the user
 		// some more detailed next steps that are appropriate for interactive
 		// shell usage.
@@ -369,7 +391,7 @@ func (c *InitCommand) getModules(ctx context.Context, path, testsDir string, ear
 
 	hooks := view.Hooks(true)
 
-	installAbort, installDiags := c.installModules(ctx, path, testsDir, upgrade, false, hooks)
+	installAbort, installDiags := c.installModules(ctx, path, testsDir, upgrade, false, hooks, view)
 	diags = diags.Append(installDiags)
 
 	// At this point, installModules may have generated error diags or been
@@ -378,8 +400,8 @@ func (c *InitCommand) getModules(ctx context.Context, path, testsDir string, ear
 
 	// Since module installer has modified the module manifest on disk, we need
 	// to refresh the cache of it in the loader.
-	if c.configLoader != nil {
-		if err := c.configLoader.RefreshModules(); err != nil {
+	if c.cfgLoader != nil {
+		if err := c.cfgLoader.RefreshModules(); err != nil {
 			// Should never happen
 			diags = diags.Append(tfdiags.Sourceless(
 				tfdiags.Error,
@@ -389,14 +411,14 @@ func (c *InitCommand) getModules(ctx context.Context, path, testsDir string, ear
 		}
 	}
 
+	tracing.SetSpanError(span, diags)
 	return true, installAbort, diags
 }
 
-func (c *InitCommand) initCloud(ctx context.Context, root *configs.Module, extraConfig flags.RawFlags, enc encryption.Encryption, view views.Init) (be backend.Backend, output bool, diags tfdiags.Diagnostics) {
+func (c *InitCommand) initCloud(ctx context.Context, root *configs.Module, extraConfig flags.RawFlags, enc encryption.Encryption, view views.Backend) (be backend.Backend, output bool, diags tfdiags.Diagnostics) {
 	ctx, span := tracing.Tracer().Start(ctx, "Cloud backend init")
 	_ = ctx // prevent staticcheck from complaining to avoid a maintenance hazard of having the wrong ctx in scope here
 	defer span.End()
-
 	view.InitializingCloudBackend()
 
 	if len(extraConfig.AllItems()) != 0 {
@@ -413,6 +435,7 @@ func (c *InitCommand) initCloud(ctx context.Context, root *configs.Module, extra
 	opts := &BackendOpts{
 		Config: &backendConfig,
 		Init:   true,
+		View:   view,
 	}
 
 	back, backDiags := c.Backend(ctx, opts, enc.State())
@@ -420,11 +443,10 @@ func (c *InitCommand) initCloud(ctx context.Context, root *configs.Module, extra
 	return back, true, diags
 }
 
-func (c *InitCommand) initBackend(ctx context.Context, root *configs.Module, extraConfig flags.RawFlags, enc encryption.Encryption, view views.Init) (be backend.Backend, output bool, diags tfdiags.Diagnostics) {
+func (c *InitCommand) initBackend(ctx context.Context, root *configs.Module, extraConfig flags.RawFlags, enc encryption.Encryption, view views.Backend) (be backend.Backend, output bool, diags tfdiags.Diagnostics) {
 	ctx, span := tracing.Tracer().Start(ctx, "Backend init")
 	_ = ctx // prevent staticcheck from complaining to avoid a maintenance hazard of having the wrong ctx in scope here
 	defer span.End()
-
 	view.InitializingBackend()
 
 	var backendConfig *configs.Backend
@@ -499,6 +521,7 @@ the backend configuration is present and valid.
 		Config:         backendConfig,
 		ConfigOverride: backendConfigOverride,
 		Init:           true,
+		View:           view,
 	}
 
 	back, backDiags := c.Backend(ctx, opts, enc.State())
@@ -520,11 +543,31 @@ func (c *InitCommand) getProviders(ctx context.Context, config *configs.Config, 
 
 	// First we'll collect all the provider dependencies we can see in the
 	// configuration and the state.
-	reqs, qualifs, hclDiags := config.ProviderRequirements()
-	diags = diags.Append(hclDiags)
-	if hclDiags.HasErrors() {
-		return false, true, diags
+
+	var reqs getproviders.Requirements
+	var qualifs *getproviders.ProvidersQualification
+
+	if c.NewRuntimeEnabled() {
+		// Use new runtime to determine providers
+
+		configInst, moreDiags := c.StaticConfigInstance(ctx, config.Module, nil)
+		if moreDiags.HasErrors() {
+			return false, true, diags
+		}
+		reqs, qualifs, moreDiags = configInst.ProviderRequirements(ctx)
+		diags = diags.Append(moreDiags)
+		if moreDiags.HasErrors() {
+			return false, true, diags
+		}
+	} else {
+		var hclDiags hcl.Diagnostics
+		reqs, qualifs, hclDiags = config.ProviderRequirements()
+		diags = diags.Append(hclDiags)
+		if hclDiags.HasErrors() {
+			return false, true, diags
+		}
 	}
+
 	if state != nil {
 		stateReqs := state.ProviderRequirements()
 		reqs = reqs.Merge(stateReqs)
@@ -760,7 +803,7 @@ func (c *InitCommand) getProviders(ctx context.Context, config *configs.Config, 
 					diags = diags.Append(tfdiags.Sourceless(
 						tfdiags.Error,
 						summaryIncompatible,
-						fmt.Sprintf(errProviderVersionIncompatible, provider.String()),
+						fmt.Sprintf(`No compatible versions of provider %s were found.`, provider.String()),
 					))
 				case version.GreaterThan(closestAvailable):
 					diags = diags.Append(tfdiags.Sourceless(
@@ -956,12 +999,10 @@ func (c *InitCommand) getProviders(ctx context.Context, config *configs.Config, 
 		if len(incompleteProviders) > 0 {
 			// We don't really care about the order here, we just want the
 			// output to be deterministic.
-			sort.Slice(incompleteProviders, func(i, j int) bool {
-				return incompleteProviders[i] < incompleteProviders[j]
-			})
+			slices.Sort(incompleteProviders)
 			diags = diags.Append(tfdiags.Sourceless(
 				tfdiags.Warning,
-				incompleteLockFileInformationHeader,
+				`Incomplete lock file information for providers`,
 				fmt.Sprintf(
 					incompleteLockFileInformationBody,
 					strings.Join(incompleteProviders, "\n  - "),
@@ -1019,7 +1060,7 @@ func warnOnFailedImplicitProvReference(provider addrs.Provider, qualifs *getprov
 		&hcl.Diagnostic{
 			Severity: hcl.DiagWarning,
 			Subject:  ref.Ref.ToHCL().Ptr(),
-			Summary:  implicitProviderReferenceHead,
+			Summary:  `Automatically-inferred provider dependency`,
 			Detail:   details,
 		})
 }
@@ -1131,39 +1172,6 @@ func (c *InitCommand) backendConfigOverrideBody(flags flags.RawFlags, schema *co
 
 func (c *InitCommand) AutocompleteArgs() complete.Predictor {
 	return complete.PredictDirs("")
-}
-
-// TODO meta-refactor: move this to arguments once all commands are using the same shim logic
-func (c *InitCommand) GatherVariables(args *arguments.Vars) {
-	// FIXME the arguments package currently trivially gathers variable related
-	// arguments in a heterogeneous slice, in order to minimize the number of
-	// code paths gathering variables during the transition to this structure.
-	// Once all commands that gather variables have been converted to this
-	// structure, we could move the variable gathering code to the arguments
-	// package directly, removing this shim layer.
-
-	varArgs := args.All()
-	items := make([]flags.RawFlag, len(varArgs))
-	for i := range varArgs {
-		items[i].Name = varArgs[i].Name
-		items[i].Value = varArgs[i].Value
-	}
-	c.Meta.variableArgs = flags.RawFlags{Items: &items}
-}
-
-// configureBackendFlags is a temporary shim until we move the backend migration logic away from the Meta fields.
-//
-// TODO meta-refactor: remove this when the Meta fields configured here will be removed and replaced
-// with proper arguments for the backend.
-func (c *InitCommand) configureBackendFlags(args *arguments.Backend) {
-	c.forceInitCopy = args.ForceInitCopy
-	c.reconfigure = args.Reconfigure
-	c.migrateState = args.MigrateState
-	c.Meta.ignoreRemoteVersion = args.IgnoreRemoteVersion
-	// TODO meta-refactor: unify these 2 args attributes with the state flags in arguments.extendedFlagSet
-	//  https://github.com/opentofu/opentofu/blob/db8c872defd8666618649ef7e29fa2b809adfd5e/internal/command/arguments/extended.go#L320-L321
-	c.Meta.stateLock = args.StateLock
-	c.Meta.stateLockTimeout = args.StateLockTimeout
 }
 
 func (c *InitCommand) AutocompleteFlags() complete.Flags {
@@ -1308,14 +1316,6 @@ func (c *InitCommand) Synopsis() string {
 	return "Prepare your working directory for other commands"
 }
 
-const errInitCopyNotEmpty = `
-The working directory already contains files. The -from-module option requires
-an empty directory into which a copy of the referenced module will be placed.
-
-To initialize the configuration already in this working directory, omit the
--from-module option.
-`
-
 // providerProtocolTooOld is a message sent to the CLI UI if the provider's
 // supported protocol versions are too old for the user's version of tofu,
 // but a newer version of the provider is compatible.
@@ -1344,13 +1344,6 @@ Consult the documentation for this provider for more information on compatibilit
 Alternatively, upgrade to the latest version of OpenTofu for compatibility with newer provider releases.
 `
 
-// No version of the provider is compatible.
-const errProviderVersionIncompatible = `No compatible versions of provider %s were found.`
-
-// incompleteLockFileInformationHeader is the summary displayed to users when
-// the lock file has only recorded local hashes.
-const incompleteLockFileInformationHeader = `Incomplete lock file information for providers`
-
 // incompleteLockFileInformationBody is the body of text displayed to users when
 // the lock file has only recorded local hashes.
 const incompleteLockFileInformationBody = `Due to your customized provider installation methods, OpenTofu was forced to calculate lock file checksums locally for the following providers:
@@ -1361,8 +1354,6 @@ The current .terraform.lock.hcl file only includes checksums for %s, so OpenTofu
 To calculate additional checksums for another platform, run:
   tofu providers lock -platform=linux_amd64
 (where linux_amd64 is the platform to generate)`
-
-const implicitProviderReferenceHead = `Automatically-inferred provider dependency`
 
 const implicitProviderReferenceBody = `Due to the prefix of the resource type name OpenTofu guessed that you intended to associate %s with a provider whose local name is "%s", but that name is not declared in this module's required_providers block. OpenTofu therefore guessed that you intended to use %s, but that provider does not exist.
 

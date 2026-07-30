@@ -9,9 +9,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"flag"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -21,16 +19,16 @@ import (
 
 	"github.com/hashicorp/go-plugin"
 	"github.com/hashicorp/go-retryablehttp"
-	"github.com/mitchellh/cli"
-	"github.com/mitchellh/colorstring"
 	"github.com/opentofu/opentofu/internal/command/flags"
+	"github.com/opentofu/opentofu/internal/command/system"
+	"github.com/opentofu/opentofu/internal/oci"
 	"github.com/opentofu/svchost/disco"
 
 	"github.com/opentofu/opentofu/internal/addrs"
 	"github.com/opentofu/opentofu/internal/backend"
 	"github.com/opentofu/opentofu/internal/backend/local"
 	"github.com/opentofu/opentofu/internal/command/arguments"
-	"github.com/opentofu/opentofu/internal/command/format"
+	"github.com/opentofu/opentofu/internal/command/clistate"
 	"github.com/opentofu/opentofu/internal/command/views"
 	"github.com/opentofu/opentofu/internal/command/webbrowser"
 	"github.com/opentofu/opentofu/internal/command/workdir"
@@ -38,12 +36,10 @@ import (
 	"github.com/opentofu/opentofu/internal/configs/configload"
 	"github.com/opentofu/opentofu/internal/getmodules"
 	"github.com/opentofu/opentofu/internal/getproviders"
-	legacy "github.com/opentofu/opentofu/internal/legacy/tofu"
 	"github.com/opentofu/opentofu/internal/plugins"
 	"github.com/opentofu/opentofu/internal/providers"
 	"github.com/opentofu/opentofu/internal/provisioners"
 	"github.com/opentofu/opentofu/internal/states"
-	"github.com/opentofu/opentofu/internal/terminal"
 	"github.com/opentofu/opentofu/internal/tfdiags"
 	"github.com/opentofu/opentofu/internal/tofu"
 )
@@ -68,49 +64,16 @@ type Meta struct {
 	// Meta which directly read and modify paths inside the data directory.
 	WorkingDir *workdir.Dir
 
-	// Streams tracks the raw Stdout, Stderr, and Stdin handles along with
-	// some basic metadata about them, such as whether each is connected to
-	// a terminal, how wide the possible terminal is, etc.
-	//
-	// For historical reasons this might not be set in unit test code, and
-	// so functions working with this field must check if it's nil and
-	// do some default behavior instead if so, rather than panicking.
-	Streams *terminal.Streams
+	// SystemCfg holds the configuration attributes that are global for all
+	// the commands and are used by different parts of the system.
+	//SystemCfg system.Config
+	SystemCfg system.Config
 
 	View *views.View
-
-	Color            bool     // True if output should be colored
-	GlobalPluginDirs []string // Additional paths to search for plugins
-	Ui               cli.Ui   // Ui for output
 
 	// Services provides access to remote endpoint information for
 	// 'tofu-native' services running at a specific user-facing hostname.
 	Services *disco.Disco
-
-	// RunningInAutomation indicates that commands are being run by an
-	// automated system rather than directly at a command prompt.
-	//
-	// This is a hint to various command routines that it may be confusing
-	// to print out messages that suggest running specific follow-up
-	// commands, since the user consuming the output will not be
-	// in a position to run such commands.
-	//
-	// The intended use-case of this flag is when OpenTofu is running in
-	// some sort of workflow orchestration tool which is abstracting away
-	// the specific commands being run.
-	RunningInAutomation bool
-
-	// CLIConfigDir is the directory from which CLI configuration files were
-	// read by the caller and the directory where any changes to CLI
-	// configuration files by commands should be made.
-	//
-	// If this is empty then no configuration directory is available and
-	// commands which require one cannot proceed.
-	CLIConfigDir string
-
-	// PluginCacheDir, if non-empty, enables caching of downloaded plugins
-	// into the given directory.
-	PluginCacheDir string
 
 	// PluginCacheMayBreakDependencyLockFile is a temporary CLI configuration-based
 	// opt out for the behavior of only using the plugin cache dir if its
@@ -184,24 +147,6 @@ type Meta struct {
 	// just trusting that someone else did it before running OpenTofu.
 	UnmanagedProviders map[addrs.Provider]*plugin.ReattachConfig
 
-	// AllowExperimentalFeatures controls whether a command that embeds this
-	// Meta is permitted to make use of experimental OpenTofu features.
-	//
-	// Set this field only during the initial creation of Meta. If you change
-	// this field after calling methods of type Meta then the resulting
-	// behavior is undefined.
-	//
-	// In normal code this would be set by package main only in builds
-	// explicitly marked as being alpha releases or development snapshots,
-	// making experimental features unavailable otherwise. Test code may
-	// choose to set this if it needs to exercise experimental features.
-	//
-	// Some experiments predated the addition of this setting, and may
-	// therefore still be available even if this flag is false. Our intent
-	// is that all/most _future_ experiments will be unavailable unless this
-	// flag is set, to reinforce that experiments are not for production use.
-	AllowExperimentalFeatures bool
-
 	// ----------------------------------------------------------
 	// Protected: commands can set these
 	// ----------------------------------------------------------
@@ -219,87 +164,33 @@ type Meta struct {
 	// Private: do not set these
 	// ----------------------------------------------------------
 
-	// configLoader is a shared configuration loader that is used by
+	// TODO meta-refactor: we need to refactor the tests to provide a config loader
+	//   and not rely on the on-the-fly initialisation of it from the Meta struct.
+	//   Once we do it, the regular logic flow should rely on having it initialised before
+	//   creating the commands, like passing it to `initCommands`.
+	//   This way, the tests will provide the config loader and the main logic will
+	//   provide one before even creating the commands. We cannot initialise this in
+	//   the Run of the commands because some autocompletion methods rely on it too.
+	// cfgLoader is a shared configuration loader that is used by
 	// LoadConfig and other commands that access configuration files.
 	// It is initialized on first use.
-	configLoader *configload.Loader
+	cfgLoader configload.Loader
 
 	// backendState is the currently active backend state
-	backendState *legacy.BackendState
+	backendState *clistate.BackendState
 
 	// Variables for the context (private)
-	variableArgs flags.RawFlags
+	variableArgs []flags.RawFlag
 	input        bool
-
-	// Targets for this context (private)
-	targets     []addrs.Targetable
-	targetFlags []string
-
-	// Excludes for this context (private)
-	excludes     []addrs.Targetable
-	excludeFlags []string
-
-	// Internal fields
-	color bool
-	oldUi cli.Ui
 
 	// The fields below are expected to be set by the command via
 	// command line flags. See the Apply command for an example.
 	//
-	// statePath is the path to the state file. If this is empty, then
-	// no state will be loaded. It is also okay for this to be a path to
-	// a file that doesn't exist; it is assumed that this means that there
-	// is simply no state.
-	//
-	// stateOutPath is used to override the output path for the state.
-	// If not provided, the StatePath is used causing the old state to
-	// be overridden.
-	//
-	// backupPath is used to backup the state file before writing a modified
-	// version. It defaults to stateOutPath + DefaultBackupExtension
-	//
 	// parallelism is used to control the number of concurrent operations
 	// allowed when walking the graph
-	//
-	// provider is to specify specific resource providers
-	//
-	// stateLock is set to false to disable state locking
-	//
-	// stateLockTimeout is the optional duration to retry a state locks locks
-	// when it is already locked by another process.
-	//
-	// forceInitCopy suppresses confirmation for copying state data during
-	// init.
-	//
-	// reconfigure forces init to ignore any stored configuration.
-	//
-	// migrateState confirms the user wishes to migrate from the prior backend
-	// configuration to a new configuration.
-	//
-	// compactWarnings (-compact-warnings) selects a more compact presentation
-	// of warnings in the output when they are not accompanied by errors.
-	//
-	// consolidateWarnings (-consolidate-warnings=false) disables consolidation
-	// of warnings in the output, printing all instances of a particular warning.
-	//
-	// consolidateErrors (-consolidate-errors=true) enables consolidation
-	// of errors in the output, printing a single instances of a particular warning.
-	statePath           string
-	stateOutPath        string
-	backupPath          string
-	parallelism         int
-	stateLock           bool
-	stateLockTimeout    time.Duration
-	forceInitCopy       bool
-	reconfigure         bool
-	migrateState        bool
-	compactWarnings     bool
-	consolidateWarnings bool
-	consolidateErrors   bool
-
-	// Used with commands which write state to allow users to write remote
-	// state even if the remote and local OpenTofu versions don't match.
-	ignoreRemoteVersion bool
+	stateArgs   arguments.State
+	backendArgs arguments.Backend
+	parallelism int
 
 	// Used to cache the root module rootModuleCallCache and known variables.
 	// This helps prevent duplicate errors/warnings.
@@ -312,6 +203,7 @@ type Meta struct {
 	// In any other cases, this configuration is built and used directly in `realMain`
 	// when the providers sources are built.
 	ProviderSourceLocationConfig getproviders.LocationConfig
+	OCICredentialsPolicyBuilder  oci.OCICredsPolicyBuilder
 }
 
 type testingOverrides struct {
@@ -319,38 +211,9 @@ type testingOverrides struct {
 	Provisioners map[string]provisioners.Factory
 }
 
-// initStatePaths is used to initialize the default values for
-// statePath, stateOutPath, and backupPath
-func (m *Meta) initStatePaths() {
-	if m.statePath == "" {
-		m.statePath = arguments.DefaultStateFilename
-	}
-	if m.stateOutPath == "" {
-		m.stateOutPath = m.statePath
-	}
-	if m.backupPath == "" {
-		m.backupPath = m.stateOutPath + DefaultBackupExtension
-	}
-}
-
 // StateOutPath returns the true output path for the state file
 func (m *Meta) StateOutPath() string {
-	return m.stateOutPath
-}
-
-// Colorize returns the colorization structure for a command.
-func (m *Meta) Colorize() *colorstring.Colorize {
-	colors := make(map[string]string)
-	for k, v := range colorstring.DefaultColors {
-		colors[k] = v
-	}
-	colors["purple"] = "38;5;57"
-
-	return &colorstring.Colorize{
-		Colors:  colors,
-		Disable: !m.color,
-		Reset:   true,
-	}
+	return m.stateArgs.StateOutPath
 }
 
 const (
@@ -384,46 +247,8 @@ func (m *Meta) InputMode() tofu.InputMode {
 // UIInput returns a UIInput object to be used for asking for input.
 func (m *Meta) UIInput() tofu.UIInput {
 	return &UIInput{
-		Colorize: m.Colorize(),
+		Colorize: m.View.Colorize(),
 	}
-}
-
-// OutputColumns returns the number of columns that normal (non-error) UI
-// output should be wrapped to fill.
-//
-// This is the column count to use if you'll be printing your message via
-// the Output or Info methods of m.Ui.
-func (m *Meta) OutputColumns() int {
-	if m.Streams == nil {
-		// A default for unit tests that don't populate Meta fully.
-		return 78
-	}
-	return m.Streams.Stdout.Columns()
-}
-
-// ErrorColumns returns the number of columns that error UI output should be
-// wrapped to fill.
-//
-// This is the column count to use if you'll be printing your message via
-// the Error or Warn methods of m.Ui.
-func (m *Meta) ErrorColumns() int {
-	if m.Streams == nil {
-		// A default for unit tests that don't populate Meta fully.
-		return 78
-	}
-	return m.Streams.Stderr.Columns()
-}
-
-// StdinPiped returns true if the input is piped.
-func (m *Meta) StdinPiped() bool {
-	if m.Streams == nil {
-		// If we don't have m.Streams populated then we're presumably in a unit
-		// test that doesn't properly populate Meta, so we'll just say the
-		// output _isn't_ piped because that's the common case and so most likely
-		// to be useful to a unit test.
-		return false
-	}
-	return !m.Streams.Stdin.IsTerminal()
 }
 
 // InterruptibleContext returns a context.Context that will be cancelled
@@ -582,6 +407,22 @@ func (m *Meta) contextOpts(ctx context.Context) (*tofu.ContextOpts, error) {
 		)
 	}
 
+	if m.NewRuntimeEnabled() {
+		// Inject runtime modules if the new runtime is enabled.
+		// This allows the shims in the tofu module to function
+		// without having to understand module installation logic.
+
+		loader := m.configLoader()
+
+		// This gets the current directory as full path.
+		path := m.WorkingDir.NormalizePath(m.WorkingDir.RootModuleDir())
+		root, _ := loader.LoadConfigDirUneval(path, configs.SelectiveLoadAll)
+		opts.Modules = &newRuntimeModules{
+			loader: loader,
+			root:   root,
+		}
+	}
+
 	opts.Meta = &tofu.ContextMeta{
 		Env:                workspace,
 		OriginalWorkingDir: m.WorkingDir.OriginalWorkingDir(),
@@ -590,139 +431,13 @@ func (m *Meta) contextOpts(ctx context.Context) (*tofu.ContextOpts, error) {
 	return &opts, err
 }
 
-// defaultFlagSet creates a default flag set for commands.
-// See also command/arguments/default.go
-func (m *Meta) defaultFlagSet(n string) *flag.FlagSet {
-	f := flag.NewFlagSet(n, flag.ContinueOnError)
-	f.SetOutput(io.Discard)
-
-	// Set the default Usage to empty
-	f.Usage = func() {}
-
-	return f
-}
-
-func (m *Meta) varFlagSet(f *flag.FlagSet) {
-	if m.variableArgs.Items == nil {
-		m.variableArgs = flags.NewRawFlags("-var")
-	}
-	varValues := m.variableArgs.Alias("-var")
-	varFiles := m.variableArgs.Alias("-var-file")
-	f.Var(varValues, "var", "variables")
-	f.Var(varFiles, "var-file", "variable file")
-}
-
-// extendedFlagSet adds custom flags that are mostly used by commands
-// that are used to run an operation like plan or apply.
-func (m *Meta) extendedFlagSet(n string) *flag.FlagSet {
-	f := m.defaultFlagSet(n)
-
-	f.BoolVar(&m.input, "input", true, "input")
-	f.Var((*flags.FlagStringSlice)(&m.targetFlags), "target", "resource to target")
-	f.Var((*flags.FlagStringSlice)(&m.excludeFlags), "exclude", "resource to exclude")
-	f.BoolVar(&m.compactWarnings, "compact-warnings", false, "use compact warnings")
-	f.BoolVar(&m.consolidateWarnings, "consolidate-warnings", true, "consolidate warnings")
-	f.BoolVar(&m.consolidateErrors, "consolidate-errors", false, "consolidate errors")
-
-	m.varFlagSet(f)
-
-	// commands that bypass locking will supply their own flag on this var,
-	// but set the initial meta value to true as a failsafe.
-	m.stateLock = true
-
-	return f
-}
-
-// process will process any -no-color entries out of the arguments. This
-// will potentially modify the args in-place. It will return the resulting
-// slice, and update the Meta and Ui.
-func (m *Meta) process(args []string) []string {
-	// We do this so that we retain the ability to technically call
-	// process multiple times, even if we have no plans to do so
-	if m.oldUi != nil {
-		m.Ui = m.oldUi
-	}
-
-	// Set colorization
-	m.color = m.Color
-	i := 0 // output index
-	for _, v := range args {
-		if v == "-no-color" {
-			m.color = false
-			m.Color = false
-		} else {
-			// copy and increment index
-			args[i] = v
-			i++
-		}
-	}
-	args = args[:i]
-
-	// Set the UI
-	m.oldUi = m.Ui
-	m.Ui = &cli.ConcurrentUi{
-		Ui: &ColorizeUi{
-			Colorize:   m.Colorize(),
-			ErrorColor: "[red]",
-			WarnColor:  "[yellow]",
-			Ui:         m.oldUi,
-		},
-	}
-
-	// Reconfigure the view. This is necessary for commands which use both
-	// views.View and cli.Ui during the migration phase.
-	if m.View != nil {
-		m.View.Configure(&arguments.View{
-			CompactWarnings:     m.compactWarnings,
-			ConsolidateWarnings: m.consolidateWarnings,
-			ConsolidateErrors:   m.consolidateErrors,
-			NoColor:             !m.Color,
-		})
-	}
-
-	return args
-}
-
-// configureUiFromView is a shim method between now and the moment when
-// the remote backend and cloud package use the new View abstraction.
-// This method does several things:
-//   - creates a new [NewBasicUI] if [Meta.Ui] is nil (needed for testing, see below)
-//   - wraps the existing [Meta.Ui] into a new layer that uses the [views.View]
-//     to print information and the existing [Meta.Ui] to ask for use input
-func (m *Meta) configureUiFromView(options arguments.ViewOptions) {
-	// We do this so that we retain the ability to technically call
-	// process multiple times, even if we have no plans to do so
-	if m.oldUi != nil {
-		m.Ui = m.oldUi
-	}
-	// This is a workaround to be able to get rid of the [Meta.Ui] slow and steady.
-	// For the moment, this builds the Ui in the same way it's built in the main.go, but we want
-	// it added here to remove the requirement of having the Ui initialised during tests.
-	// The highlight here is that the "printing" is done through the [Meta.View] and
-	// this Ui instance is used only to ask for user input.
-	// Therefore, tests can initialise only the View and check the output from there.
-	if m.Ui == nil {
-		m.Ui = NewBasicUI()
-	}
-
-	// Backup the current Ui to be used later
-	m.oldUi = m.Ui
-
-	// Createa new ViewUi that wraps the View for printing and oldUi for user input
-	m.Ui = &cli.ConcurrentUi{
-		Ui: views.NewViewUI(options, m.View, m.oldUi),
-	}
-	// compared with Meta.process, this method does not configure the Meta.View, since that is the
-	// responsibility of the caller of this method.
-}
-
 // confirm asks a yes/no confirmation.
 func (m *Meta) confirm(opts *tofu.InputOpts) (bool, error) {
 	if !m.Input() {
 		return false, errors.New("input is disabled")
 	}
 
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		v, err := m.UIInput().Input(context.Background(), opts)
 		if err != nil {
 			return false, fmt.Errorf(
@@ -737,75 +452,6 @@ func (m *Meta) confirm(opts *tofu.InputOpts) (bool, error) {
 		}
 	}
 	return false, nil
-}
-
-// showDiagnostics displays error and warning messages in the UI.
-//
-// "Diagnostics" here means the Diagnostics type from the tfdiag package,
-// though as a convenience this function accepts anything that could be
-// passed to the "Append" method on that type, converting it to Diagnostics
-// before displaying it.
-//
-// Internally this function uses Diagnostics.Append, and so it will panic
-// if given unsupported value types, just as Append does.
-func (m *Meta) showDiagnostics(vals ...interface{}) {
-
-	var diags tfdiags.Diagnostics
-	diags = diags.Append(vals...)
-	diags.Sort()
-
-	if len(diags) == 0 {
-		return
-	}
-
-	outputWidth := m.ErrorColumns()
-
-	if m.consolidateWarnings {
-		diags = diags.Consolidate(1, tfdiags.Warning)
-	}
-	if m.consolidateErrors {
-		diags = diags.Consolidate(1, tfdiags.Error)
-	}
-
-	// Since warning messages are generally competing
-	if m.compactWarnings {
-		// If the user selected compact warnings and all of the diagnostics are
-		// warnings then we'll use a more compact representation of the warnings
-		// that only includes their summaries.
-		// We show full warnings if there are also errors, because a warning
-		// can sometimes serve as good context for a subsequent error.
-		useCompact := true
-		for _, diag := range diags {
-			if diag.Severity() != tfdiags.Warning {
-				useCompact = false
-				break
-			}
-		}
-		if useCompact {
-			msg := format.DiagnosticWarningsCompact(diags, m.Colorize())
-			msg = "\n" + msg + "\nTo see the full warning notes, run OpenTofu without -compact-warnings.\n"
-			m.Ui.Warn(msg)
-			return
-		}
-	}
-
-	for _, diag := range diags {
-		var msg string
-		if m.Color {
-			msg = format.Diagnostic(diag, m.configSources(), m.Colorize(), outputWidth)
-		} else {
-			msg = format.DiagnosticPlain(diag, m.configSources(), outputWidth)
-		}
-
-		switch diag.Severity() {
-		case tfdiags.Error:
-			m.Ui.Error(msg)
-		case tfdiags.Warning:
-			m.Ui.Warn(msg)
-		default:
-			m.Ui.Output(msg)
-		}
-	}
 }
 
 // WorkspaceNameEnvVar is the name of the environment variable that can be used
@@ -871,27 +517,10 @@ func isAutoVarFile(path string) bool {
 		strings.HasSuffix(path, ".auto.tfvars.json")
 }
 
-// FIXME: as an interim refactoring step, we apply the contents of the state
-// arguments directly to the Meta object. Future work would ideally update the
-// code paths which use these arguments to be passed them directly for clarity.
-func (m *Meta) applyStateArguments(args *arguments.State) {
-	m.stateLock = args.Lock
-	m.stateLockTimeout = args.LockTimeout
-	m.statePath = args.StatePath
-	m.stateOutPath = args.StateOutPath
-	m.backupPath = args.BackupPath
-}
-
 // checkRequiredVersion loads the config and check if the
 // core version requirements are satisfied.
 func (m *Meta) checkRequiredVersion(ctx context.Context) tfdiags.Diagnostics {
 	var diags tfdiags.Diagnostics
-
-	loader, err := m.initConfigLoader()
-	if err != nil {
-		diags = diags.Append(err)
-		return diags
-	}
 
 	pwd, err := os.Getwd()
 	if err != nil {
@@ -905,18 +534,14 @@ func (m *Meta) checkRequiredVersion(ctx context.Context) tfdiags.Diagnostics {
 		return diags
 	}
 
-	config, configDiags := loader.LoadConfig(ctx, pwd, call)
+	_, configDiags := m.configLoader().LoadConfig(ctx, pwd, call)
 	if configDiags.HasErrors() {
 		diags = diags.Append(configDiags)
 		return diags
 	}
 
-	versionDiags := tofu.CheckCoreVersionRequirements(config)
-	if versionDiags.HasErrors() {
-		diags = diags.Append(versionDiags)
-		return diags
-	}
-
+	// If there were any OpenTofu-version-related errors then they would've
+	// already been detected by loader.LoadConfig above.
 	return nil
 }
 
@@ -925,7 +550,7 @@ func (m *Meta) checkRequiredVersion(ctx context.Context) tfdiags.Diagnostics {
 // it could potentially return nil without errors. It is the
 // responsibility of the caller to handle the lack of schema
 // information accordingly
-func (c *Meta) MaybeGetSchemas(ctx context.Context, state *states.State, config *configs.Config) (*tofu.Schemas, tfdiags.Diagnostics) {
+func (m *Meta) MaybeGetSchemas(ctx context.Context, state *states.State, config *configs.Config) (*tofu.Schemas, tfdiags.Diagnostics) {
 	var diags tfdiags.Diagnostics
 
 	path, err := os.Getwd()
@@ -935,7 +560,7 @@ func (c *Meta) MaybeGetSchemas(ctx context.Context, state *states.State, config 
 	}
 
 	if config == nil {
-		config, diags = c.loadConfig(ctx, path)
+		config, diags = m.loadConfig(ctx, path)
 		if diags.HasErrors() {
 			diags.Append(tfdiags.SimpleWarning(failedToLoadSchemasMessage))
 			return nil, diags
@@ -943,7 +568,7 @@ func (c *Meta) MaybeGetSchemas(ctx context.Context, state *states.State, config 
 	}
 
 	if config != nil || state != nil {
-		opts, err := c.contextOpts(ctx)
+		opts, err := m.contextOpts(ctx)
 		if err != nil {
 			diags = diags.Append(err)
 			return nil, diags

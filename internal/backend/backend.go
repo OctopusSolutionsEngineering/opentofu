@@ -170,7 +170,13 @@ type Local interface {
 	// backend's implementations of this to understand what this actually
 	// does, because this operation has no well-defined contract aside from
 	// "whatever it already does".
-	LocalRun(context.Context, *Operation) (*LocalRun, statemgr.Full, tfdiags.Diagnostics)
+	//
+	// Even though both contexts contain the tracing information, there is a crucial difference between the two:
+	//  - The first one is non-cancellable meaning that it's safe to be used for thing like state unlocking and other
+	//    critical operations that need to run even when the process is asked to end gracefully.
+	//  - The second one is a cancellable context. This is the context that should be used to cancel operations
+	//    for a graceful shutdown.
+	LocalRun(context.Context, context.Context, *Operation) (*LocalRun, statemgr.Full, tfdiags.Diagnostics)
 }
 
 // LocalRun represents the assortment of objects that we can collect or
@@ -267,7 +273,7 @@ type Operation struct {
 
 	// ConfigLoader is a configuration loader that can be used to load
 	// configuration from ConfigDir.
-	ConfigLoader *configload.Loader
+	ConfigLoader configload.Loader
 
 	// DependencyLocks represents the locked dependencies associated with
 	// the configuration directory given in ConfigDir.
@@ -314,8 +320,7 @@ type Operation struct {
 	View views.Operation
 
 	// Input/output/control options.
-	UIIn  tofu.UIInput
-	UIOut tofu.UIOutput
+	UIIn tofu.UIInput
 
 	// StateLocker is used to lock the state while providing UI feedback to the
 	// user. This will be replaced by the Backend to update the context.

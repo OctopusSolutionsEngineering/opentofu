@@ -15,8 +15,9 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/opentofu/opentofu/internal/command/workdir"
 	"github.com/zclconf/go-cty/cty"
+
+	"github.com/opentofu/opentofu/internal/command/workdir"
 
 	"github.com/opentofu/opentofu/internal/addrs"
 	"github.com/opentofu/opentofu/internal/configs/configschema"
@@ -690,6 +691,105 @@ func TestShow_json_output(t *testing.T) {
 	}
 }
 
+func TestShow_json_output_identity(t *testing.T) {
+	fixtureDir := "testdata/show-json-identity"
+	testDirs, err := os.ReadDir(fixtureDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, entry := range testDirs {
+		if !entry.IsDir() {
+			continue
+		}
+
+		t.Run(entry.Name(), func(t *testing.T) {
+			td := t.TempDir()
+			inputDir := filepath.Join(fixtureDir, entry.Name())
+			testCopyDir(t, inputDir, td)
+			t.Chdir(td)
+
+			providerSource, close := newMockProviderSource(t, map[string][]string{
+				"test": {"1.2.3"},
+			})
+			defer close()
+
+			p := showFixtureIdentityProvider()
+
+			// init
+			view, done := testView(t)
+			ic := &InitCommand{
+				Meta: Meta{
+					WorkingDir:       workdir.NewDir("."),
+					testingOverrides: metaOverridesForProvider(p),
+					View:             view,
+					ProviderSource:   providerSource,
+				},
+			}
+			code := ic.Run([]string{})
+			output := done(t)
+			if code != 0 {
+				t.Fatalf("init failed\n%s", output.Stderr())
+			}
+
+			// plan
+			planView, planDone := testView(t)
+			pc := &PlanCommand{
+				Meta: Meta{
+					WorkingDir:       workdir.NewDir("."),
+					testingOverrides: metaOverridesForProvider(p),
+					View:             planView,
+					ProviderSource:   providerSource,
+				},
+			}
+			code = pc.Run([]string{"-out=tofu.plan"})
+			planOutput := planDone(t)
+			if code != 0 {
+				t.Fatalf("plan failed\n%s", planOutput.Stderr())
+			}
+
+			// show
+			showView, showDone := testView(t)
+			sc := &ShowCommand{
+				Meta: Meta{
+					WorkingDir:       workdir.NewDir("."),
+					testingOverrides: metaOverridesForProvider(p),
+					View:             showView,
+					ProviderSource:   providerSource,
+				},
+			}
+			code = sc.Run([]string{"-json", "tofu.plan"})
+			showOutput := showDone(t)
+			if code != 0 {
+				t.Fatalf("show failed\n%s", showOutput.Stderr())
+			}
+
+			// validate plan
+			var got plan
+			gotString := showOutput.Stdout()
+			if err := json.Unmarshal([]byte(gotString), &got); err != nil {
+				t.Fatal(err)
+			}
+
+			// against our expected output
+			byteValue, err := os.ReadFile("output.json")
+			if err != nil {
+				t.Fatalf("unexpected err: %s", err)
+			}
+			var want plan
+			if err := json.Unmarshal(byteValue, &want); err != nil {
+				t.Fatal(err, "failed to unmarshal expected output")
+			}
+
+			want.FormatVersion = got.FormatVersion
+
+			if diff := cmp.Diff(want, got); diff != "" {
+				t.Fatal("wrong result:\n" + diff)
+			}
+		})
+	}
+}
+
 func TestShow_json_output_sensitive(t *testing.T) {
 	td := t.TempDir()
 	inputDir := "testdata/show-json-sensitive"
@@ -957,10 +1057,10 @@ func TestShow_json_output_state(t *testing.T) {
 
 			// compare ui output to wanted output
 			type state struct {
-				FormatVersion    string                 `json:"format_version,omitempty"`
-				TerraformVersion string                 `json:"terraform_version"`
-				Values           map[string]interface{} `json:"values,omitempty"`
-				SensitiveValues  map[string]bool        `json:"sensitive_values,omitempty"`
+				FormatVersion    string          `json:"format_version,omitempty"`
+				TerraformVersion string          `json:"terraform_version"`
+				Values           map[string]any  `json:"values,omitempty"`
+				SensitiveValues  map[string]bool `json:"sensitive_values,omitempty"`
 			}
 			var got, want state
 
@@ -1295,6 +1395,51 @@ func showFixtureSensitiveProvider() *tofu.MockProvider {
 	return p
 }
 
+// showFixtureIdentityProvider returns a mock provider that includes resource identity information.
+// This is built on top of [showFixtureProvider] to reuse the same configuration and basic plan/apply behavior, with
+// additional wrapping to include identity information in the provider schema and plan/read responses.
+func showFixtureIdentityProvider() *tofu.MockProvider {
+	p := showFixtureProvider()
+
+	// Add identity schema to existing resource type
+	schema := p.GetProviderSchemaResponse.ResourceTypes["test_instance"]
+	schema.IdentitySchema = &configschema.Object{
+		Attributes: map[string]*configschema.Attribute{
+			"id": {Type: cty.String, Required: true},
+		},
+		Nesting: configschema.NestingSingle,
+	}
+	p.GetProviderSchemaResponse.ResourceTypes["test_instance"] = schema
+
+	// Wrap existing PlanResourceChangeFn to also return identity
+	origPlan := p.PlanResourceChangeFn
+	p.PlanResourceChangeFn = func(req providers.PlanResourceChangeRequest) providers.PlanResourceChangeResponse {
+		resp := origPlan(req)
+		if resp.PlannedState.IsNull() {
+			return resp
+		}
+		idVal := resp.PlannedState.GetAttr("id")
+		if idVal.IsKnown() {
+			resp.PlannedIdentity = cty.ObjectVal(map[string]cty.Value{
+				"id": idVal,
+			})
+		}
+		return resp
+	}
+
+	// Wrap ReadResourceFn to also return identity
+	origRead := p.ReadResourceFn
+	p.ReadResourceFn = func(req providers.ReadResourceRequest) providers.ReadResourceResponse {
+		resp := origRead(req)
+		resp.NewIdentity = cty.ObjectVal(map[string]cty.Value{
+			"id": resp.NewState.GetAttr("id"),
+		})
+		return resp
+	}
+
+	return p
+}
+
 // showFixturePlanFile creates a plan file at a temporary location containing a
 // single change to create or update the test_instance.foo that is included in the "show"
 // test fixture, returning the location of that plan file.
@@ -1343,21 +1488,21 @@ func showFixturePlanFile(t *testing.T, action plans.Action) string {
 // to avoid needing to constantly update the expected output; as a potential
 // TODO we could write a jsonplan compare function.
 type plan struct {
-	FormatVersion   string                 `json:"format_version,omitempty"`
-	Variables       map[string]interface{} `json:"variables,omitempty"`
-	PlannedValues   map[string]interface{} `json:"planned_values,omitempty"`
-	ResourceDrift   []interface{}          `json:"resource_drift,omitempty"`
-	ResourceChanges []interface{}          `json:"resource_changes,omitempty"`
-	OutputChanges   map[string]interface{} `json:"output_changes,omitempty"`
-	PriorState      priorState             `json:"prior_state,omitempty"`
-	Config          map[string]interface{} `json:"configuration,omitempty"`
-	Errored         bool                   `json:"errored"`
+	FormatVersion   string         `json:"format_version,omitempty"`
+	Variables       map[string]any `json:"variables,omitempty"`
+	PlannedValues   map[string]any `json:"planned_values,omitempty"`
+	ResourceDrift   []any          `json:"resource_drift,omitempty"`
+	ResourceChanges []any          `json:"resource_changes,omitempty"`
+	OutputChanges   map[string]any `json:"output_changes,omitempty"`
+	PriorState      priorState     `json:"prior_state"`
+	Config          map[string]any `json:"configuration,omitempty"`
+	Errored         bool           `json:"errored"`
 }
 
 type priorState struct {
-	FormatVersion   string                 `json:"format_version,omitempty"`
-	Values          map[string]interface{} `json:"values,omitempty"`
-	SensitiveValues map[string]bool        `json:"sensitive_values,omitempty"`
+	FormatVersion   string          `json:"format_version,omitempty"`
+	Values          map[string]any  `json:"values,omitempty"`
+	SensitiveValues map[string]bool `json:"sensitive_values,omitempty"`
 }
 
 func TestShow_config(t *testing.T) {
@@ -1410,7 +1555,7 @@ func TestShow_config(t *testing.T) {
 	}
 
 	// Verify that the output is valid JSON
-	var got map[string]interface{}
+	var got map[string]any
 	if err := json.Unmarshal([]byte(output.Stdout()), &got); err != nil {
 		t.Fatalf("invalid JSON output: %s\n%s", err, output.Stdout())
 	}
@@ -1421,11 +1566,11 @@ func TestShow_config(t *testing.T) {
 	}
 
 	// Verify that module_calls (and its child entry) are included
-	rootModule, ok := got["root_module"].(map[string]interface{})
+	rootModule, ok := got["root_module"].(map[string]any)
 	if !ok {
 		t.Fatal("root_module is not a map")
 	}
-	moduleCalls, ok := rootModule["module_calls"].(map[string]interface{})
+	moduleCalls, ok := rootModule["module_calls"].(map[string]any)
 	if !ok || len(moduleCalls) == 0 {
 		t.Errorf("missing or empty module_calls in configuration output. Actual output: %v", got)
 	}
@@ -1517,7 +1662,7 @@ func TestShow_config_withModule(t *testing.T) {
 	}
 
 	// Verify that the output is valid JSON
-	var got map[string]interface{}
+	var got map[string]any
 	if err := json.Unmarshal([]byte(output.Stdout()), &got); err != nil {
 		t.Fatalf("invalid JSON output: %s\n%s", err, output.Stdout())
 	}
@@ -1528,11 +1673,11 @@ func TestShow_config_withModule(t *testing.T) {
 	}
 
 	// Verify that module_calls (and its child entry) are included
-	rootModule, ok := got["root_module"].(map[string]interface{})
+	rootModule, ok := got["root_module"].(map[string]any)
 	if !ok {
 		t.Fatal("root_module is not a map")
 	}
-	moduleCalls, ok := rootModule["module_calls"].(map[string]interface{})
+	moduleCalls, ok := rootModule["module_calls"].(map[string]any)
 	if !ok || len(moduleCalls) == 0 {
 		t.Errorf("missing or empty module_calls in configuration output. Actual output: %v", got)
 	}

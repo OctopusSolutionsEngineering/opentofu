@@ -261,7 +261,7 @@ func (n *nodeExpandPlannableResource) expandResourceInstances(ctx context.Contex
 	if mustHaveIndex {
 		for _, candidateAddr := range n.forceReplace {
 			if candidateAddr.Resource.Key == addrs.NoKey {
-				if n.Addr.Resource.Equal(candidateAddr.Resource.Resource) {
+				if n.Addr.Equal(candidateAddr.ConfigResource()) {
 					switch {
 					case len(instanceAddrs) == 0:
 						// In this case there _are_ no instances to replace, so
@@ -419,6 +419,9 @@ func (n *nodeExpandPlannableResource) resourceInstanceSubgraph(ctx context.Conte
 		}
 	}
 
+	// NOTE: The logic of creating a new subgraph, is also present in nodeExpandApplyableResource, but only
+	//  for ephemeral resources. If there will be any transformes added here, we need to double check
+	//  the other similar implementation and mirror the changes there if needed.
 	// Start creating the steps
 	steps := []GraphTransformer{
 		// Expand the count or for_each (if present)

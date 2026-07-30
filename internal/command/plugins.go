@@ -8,6 +8,7 @@ package command
 import (
 	"fmt"
 	"log"
+	"maps"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -90,7 +91,7 @@ func (m *Meta) pluginDirs(includeAutoInstalled bool) []string {
 	if includeAutoInstalled {
 		dirs = append(dirs, m.pluginDir())
 	}
-	dirs = append(dirs, m.GlobalPluginDirs...)
+	dirs = append(dirs, m.SystemCfg.GlobalPluginDirs...)
 
 	return dirs
 }
@@ -110,9 +111,7 @@ func (m *Meta) provisionerFactories() map[string]provisioners.Factory {
 
 	// Wire up the internal provisioners first. These might be overridden
 	// by discovered provisioners below.
-	for name, factory := range internalProvisionerFactories() {
-		factories[name] = factory
-	}
+	maps.Copy(factories, internalProvisionerFactories())
 
 	byName := plugins.ByName()
 	for name, metas := range byName {

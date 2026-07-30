@@ -10,7 +10,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -20,8 +19,10 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	tfe "github.com/hashicorp/go-tfe"
+	"github.com/mitchellh/cli"
 	"github.com/opentofu/opentofu/internal/command/arguments"
 	"github.com/opentofu/opentofu/internal/command/views"
 	"github.com/opentofu/opentofu/internal/tracing"
@@ -64,12 +65,6 @@ func (c *LoginCommand) Run(rawArgs []string) int {
 	// in order to keep functional parity, we setup the view to add a new line after each diagnostic.
 	c.View.DiagsWithNewline()
 
-	// Propagate -no-color for legacy use of Ui. The remote backend and
-	// cloud package use this; it should be removed when/if they are
-	// migrated to views.
-	c.Meta.color = !common.NoColor
-	c.Meta.Color = c.Meta.color
-
 	// Parse and validate flags
 	args, closer, diags := arguments.ParseLogin(rawArgs)
 	defer closer()
@@ -77,26 +72,19 @@ func (c *LoginCommand) Run(rawArgs []string) int {
 	// Instantiate the view, even if there are flag errors, so that we render
 	// diagnostics according to the desired view
 	view := views.NewLogin(args.ViewOptions, c.View)
-	// ... and initialise the Meta.Ui to wrap Meta.View into a new implementation
-	// that is able to print by using View abstraction and use the Meta.Ui
-	// to ask for the user input.
-	c.Meta.configureUiFromView(args.ViewOptions)
 	if diags.HasErrors() {
 		view.Diagnostics(diags)
-		view.HelpPrompt(c.credentialsFileForHelp())
-		return 1
+		if args.ViewOptions.ViewType == arguments.ViewJSON {
+			return 1
+		}
+		return cli.RunResultHelp
 	}
+	c.Meta.stateArgs = *args.State
 
 	// FIXME: the -input flag value is needed to initialize the backend and the
 	// operation, but there is no clear path to pass this value down, so we
 	// continue to mutate the Meta object state for now.
 	c.Meta.input = args.ViewOptions.InputEnabled
-
-	// TODO meta-refactor: when the stateLock and stateLockTimeout are extracted to be configured separately, remove
-	// these and use a common way to configure this
-	// The stateLock=true is here this way because this command used before meta.extendedFlagSet which did the same
-	// and left for the command to configure flags for this if needed.
-	c.Meta.stateLock = true
 
 	if !c.input {
 		diags = diags.Append(tfdiags.Sourceless(
@@ -266,8 +254,8 @@ func (c *LoginCommand) Run(rawArgs []string) int {
 	view.UiSeparator()
 	if hostname == hcpTerraformHost { // HCP Terraform
 		var motd struct {
-			Message string        `json:"msg"`
-			Errors  []interface{} `json:"errors"`
+			Message string `json:"msg"`
+			Errors  []any  `json:"errors"`
 		}
 
 		// Throughout the entire process of fetching a MOTD from TFC, use a default
@@ -367,10 +355,10 @@ func (c *LoginCommand) Synopsis() string {
 }
 
 func (c *LoginCommand) defaultOutputFile() string {
-	if c.CLIConfigDir == "" {
+	if c.SystemCfg.CLIConfigDir == "" {
 		return "" // no default available
 	}
-	return filepath.Join(c.CLIConfigDir, "credentials.tfrc.json")
+	return filepath.Join(c.SystemCfg.CLIConfigDir, "credentials.tfrc.json")
 }
 
 func (c *LoginCommand) interactiveGetTokenByCode(ctx context.Context, hostname svchost.Hostname, credsCtx *loginCredentialsContext, clientConfig *disco.OAuthClient, view views.Login) (*oauth2.Token, tfdiags.Diagnostics) {
@@ -378,7 +366,11 @@ func (c *LoginCommand) interactiveGetTokenByCode(ctx context.Context, hostname s
 	confirm, confirmDiags := c.interactiveContextConsent(ctx, hostname, disco.OAuthAuthzCodeGrant, credsCtx, view)
 	diags = diags.Append(confirmDiags)
 	if !confirm {
-		diags = diags.Append(errors.New("Login cancelled"))
+		diags = diags.Append(tfdiags.Sourceless(
+			tfdiags.Error,
+			"Login cancelled",
+			"Login process cancelled because it was not confirmed",
+		))
 		return nil, diags
 	}
 
@@ -422,8 +414,14 @@ func (c *LoginCommand) interactiveGetTokenByCode(ctx context.Context, hostname s
 	}
 
 	// codeCh will allow our temporary HTTP server to transmit the OAuth code
-	// to the main execution path that follows.
-	codeCh := make(chan string)
+	// to the main execution path that follows. It is buffered so the handler
+	// can send without blocking even if the main goroutine has already moved on.
+	// Only the main goroutine may close codeCh, after all producers have stopped.
+	codeCh := make(chan string, 1)
+	// serverErrCh carries any unexpected error from server.Serve so that the
+	// main goroutine can handle it without a shared-state race on diags.
+	serverErrCh := make(chan error, 1)
+	var wg sync.WaitGroup
 	server := &http.Server{
 		Handler: http.HandlerFunc(func(resp http.ResponseWriter, req *http.Request) {
 			log.Printf("[TRACE] login: request to callback server")
@@ -446,12 +444,17 @@ func (c *LoginCommand) interactiveGetTokenByCode(ctx context.Context, hostname s
 				return
 			}
 
-			log.Printf("[TRACE] login: request contains an authorization code")
-
-			// Send the code to our blocking wait below, so that the token
-			// fetching process can continue.
-			codeCh <- gotCode
-			close(codeCh)
+			// Non-blocking send: only the first callback request succeeds.
+			// Duplicate or concurrent requests are rejected with 400 so that
+			// the handler never blocks on the already-full buffered channel.
+			select {
+			case codeCh <- gotCode:
+				log.Printf("[TRACE] login: request contains an authorization code")
+			default:
+				log.Printf("[WARN] login: ignoring duplicate callback request")
+				resp.WriteHeader(400)
+				return
+			}
 
 			log.Printf("[TRACE] login: returning response from callback server")
 
@@ -464,21 +467,13 @@ func (c *LoginCommand) interactiveGetTokenByCode(ctx context.Context, hostname s
 		}),
 	}
 	panicHandler := logging.PanicHandlerWithTraceFn()
-	go func() {
+	wg.Go(func() {
 		defer panicHandler()
 		err := server.Serve(listener)
 		if err != nil && err != http.ErrServerClosed {
-			diags = diags.Append(tfdiags.Sourceless(
-				tfdiags.Error,
-				"Can't start temporary login server",
-				fmt.Sprintf(
-					"The login process uses OAuth, which requires starting a temporary HTTP server on localhost. However, no TCP port numbers between %d and %d are available to create such a server.",
-					clientConfig.MinPort, clientConfig.MaxPort,
-				),
-			))
-			close(codeCh)
+			serverErrCh <- err
 		}
-	}()
+	})
 
 	oauthConfig := &oauth2.Config{
 		ClientID:    clientConfig.ID,
@@ -513,7 +508,6 @@ func (c *LoginCommand) interactiveGetTokenByCode(ctx context.Context, hostname s
 	view.WaitingForHostSignal()
 
 	var code string
-	var ok bool
 	select {
 	case <-c.ShutdownCh:
 		diags = diags.Append(
@@ -523,22 +517,36 @@ func (c *LoginCommand) interactiveGetTokenByCode(ctx context.Context, hostname s
 				"Current command was aborted by the calling code.",
 			),
 		)
-		code, ok = "", true
+    if err := server.Shutdown(ctx); err != nil {
+		log.Printf("[WARN] login: callback server shutdown failed: %s", err)
+	}
+		wg.Wait()
 		close(codeCh)
-	case code, ok = <-codeCh:
-	}
-
-	if !ok {
-		// If we got no code at all then the server wasn't able to start
-		// up, so we'll just give up.
 		return nil, diags
+	case serveErr := <-serverErrCh:
+		// The server failed to start up, so we'll just give up.
+		// No need to call Shutdown here: the server never started accepting
+		// requests, so there are no in-flight handler goroutines to wait for.
+		log.Printf("[ERROR] login: callback server error: %s", serveErr)
+		diags = diags.Append(tfdiags.Sourceless(
+			tfdiags.Error,
+			"Can't start temporary login server",
+			fmt.Sprintf(
+				"The login process uses OAuth, which requires starting a temporary HTTP server on localhost. However, no TCP port numbers between %d and %d are available to create such a server.",
+				clientConfig.MinPort, clientConfig.MaxPort,
+			),
+		))
+		wg.Wait()
+		close(codeCh)
+		return nil, diags
+	case code = <-codeCh:
 	}
 
-	if err := server.Close(); err != nil {
-		// The server will close soon enough when our process exits anyway,
-		// so we won't fuss about it for right now.
+	if err := server.Shutdown(ctx); err != nil {
 		log.Printf("[WARN] login: callback server can't shut down: %s", err)
 	}
+	wg.Wait()
+	close(codeCh)
 
 	if code == "" {
 		// empty code is not possible in happy path as it is validated in the HTTP handler of our callback server
@@ -569,7 +577,11 @@ func (c *LoginCommand) interactiveGetTokenByPassword(ctx context.Context, hostna
 	confirm, confirmDiags := c.interactiveContextConsent(ctx, hostname, disco.OAuthOwnerPasswordGrant, credsCtx, view)
 	diags = diags.Append(confirmDiags)
 	if !confirm {
-		diags = diags.Append(errors.New("Login cancelled"))
+		diags = diags.Append(tfdiags.Sourceless(
+			tfdiags.Error,
+			"Login cancelled",
+			"Login process cancelled because it was not confirmed",
+		))
 		return nil, diags
 	}
 
@@ -581,7 +593,11 @@ func (c *LoginCommand) interactiveGetTokenByPassword(ctx context.Context, hostna
 		Query: fmt.Sprintf("Username for %s:", hostname.ForDisplay()),
 	})
 	if err != nil {
-		diags = diags.Append(fmt.Errorf("Failed to request username: %w", err))
+		diags = diags.Append(tfdiags.Sourceless(
+			tfdiags.Error,
+			"Failed to request username",
+			err.Error(),
+		))
 		return nil, diags
 	}
 	password, err := c.UIInput().Input(ctx, &tofu.InputOpts{
@@ -590,7 +606,11 @@ func (c *LoginCommand) interactiveGetTokenByPassword(ctx context.Context, hostna
 		Secret: true,
 	})
 	if err != nil {
-		diags = diags.Append(fmt.Errorf("Failed to request password: %w", err))
+		diags = diags.Append(tfdiags.Sourceless(
+			tfdiags.Error,
+			"Failed to request password",
+			err.Error(),
+		))
 		return nil, diags
 	}
 
@@ -621,7 +641,11 @@ func (c *LoginCommand) interactiveGetTokenByUI(ctx context.Context, hostname svc
 	confirm, confirmDiags := c.interactiveContextConsent(ctx, hostname, disco.OAuthGrantType(""), credsCtx, view)
 	diags = diags.Append(confirmDiags)
 	if !confirm {
-		diags = diags.Append(errors.New("Login cancelled"))
+		diags = diags.Append(tfdiags.Sourceless(
+			tfdiags.Error,
+			"Login cancelled",
+			"Login process cancelled because it was not confirmed",
+		))
 		return "", diags
 	}
 
@@ -672,7 +696,11 @@ func (c *LoginCommand) interactiveGetTokenByUI(ctx context.Context, hostname svc
 		Secret: true,
 	})
 	if err != nil {
-		diags := diags.Append(fmt.Errorf("Failed to retrieve token: %w", err))
+		diags = diags.Append(tfdiags.Sourceless(
+			tfdiags.Error,
+			"Failed to retrieve token",
+			err.Error(),
+		))
 		return "", diags
 	}
 
@@ -689,15 +717,27 @@ func (c *LoginCommand) interactiveGetTokenByUI(ctx context.Context, hostname svc
 
 	client, err := tfe.NewClient(cfg)
 	if err != nil {
-		diags = diags.Append(fmt.Errorf("Failed to create API client: %w", err))
+		diags = diags.Append(tfdiags.Sourceless(
+			tfdiags.Error,
+			"Failed to create API client",
+			err.Error(),
+		))
 		return "", diags
 	}
 	user, err := client.Users.ReadCurrent(ctx)
 	if err == tfe.ErrUnauthorized {
-		diags = diags.Append(fmt.Errorf("Token is invalid: %w", err))
+		diags = diags.Append(tfdiags.Sourceless(
+			tfdiags.Error,
+			"Token is invalid",
+			err.Error(),
+		))
 		return "", diags
 	} else if err != nil {
-		diags = diags.Append(fmt.Errorf("Failed to retrieve user account details: %w", err))
+		diags = diags.Append(tfdiags.Sourceless(
+			tfdiags.Error,
+			"Failed to retrieve user account details",
+			err.Error(),
+		))
 		return "", diags
 	}
 	view.RetrievedTokenForUser(user.Username)
@@ -737,7 +777,11 @@ func (c *LoginCommand) interactiveContextConsent(ctx context.Context, hostname s
 	if err != nil {
 		// Should not happen because this command checks that input is enabled
 		// before we get to this point.
-		diags = diags.Append(err)
+		diags = diags.Append(tfdiags.Sourceless(
+			tfdiags.Error,
+			"Error collecting user prompt",
+			err.Error(),
+		))
 		return false, diags
 	}
 
@@ -767,7 +811,7 @@ func (c *LoginCommand) listenerForCallback(minPort, maxPort uint16) (net.Listene
 	// another.
 	maxTries := availCount + (availCount / 2)
 
-	for tries := 0; tries < maxTries; tries++ {
+	for range maxTries {
 		port := rand.Intn(availCount) + int(minPort)
 		addr := fmt.Sprintf("127.0.0.1:%d", port)
 		log.Printf("[TRACE] login: trying %s as a listen address for temporary OAuth callback server", addr)

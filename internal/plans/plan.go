@@ -140,6 +140,11 @@ type Plan struct {
 	// because that runtime generates the apply-time execution graph during
 	// the apply phase using data in the other fields of this type.
 	ExecutionGraph []byte
+
+	// Destroying is a flag that the new engine requires along side the
+	// ExecutionGraph in order to alter behavior for non-resource
+	// actions during the apply.
+	Destroying bool
 }
 
 // CanApply returns true if and only if the receiving plan includes content
@@ -222,12 +227,12 @@ func (p *Plan) ProviderAddrs() []addrs.AbsProviderConfig {
 }
 
 // VariableMapper checks that all the provided variables match what has been provided while building the plan.
-func (plan *Plan) VariableMapper() configs.StaticModuleVariables {
+func (p *Plan) VariableMapper() configs.StaticModuleVariables {
 	return func(variable *configs.Variable) (cty.Value, hcl.Diagnostics) {
 		var diags hcl.Diagnostics
 
 		name := variable.Name
-		v, ok := plan.VariableValues[name]
+		v, ok := p.VariableValues[name]
 		if !ok {
 			if variable.Required() {
 				// This should not happen...

@@ -79,7 +79,8 @@ provider "aws" {
 resource "aws_instance" "foo" {
   count = 2
 }
-`})
+`,
+	})
 
 	ctx := testContext2(t, &ContextOpts{
 		Plugins: plugins.NewLibrary(map[addrs.Provider]providers.Factory{
@@ -151,7 +152,8 @@ func TestContextImport_multiInstanceProviderConfig(t *testing.T) {
 				for_each = { "foo" = "a" }
 				provider = test.multi[each.value]
 			}
-		`})
+		`,
+	})
 
 	resourceTypeSchema := providers.Schema{
 		Block: &configschema.Block{
@@ -217,7 +219,7 @@ func TestContextImport_multiInstanceProviderConfig(t *testing.T) {
 					{
 						TypeName: "test_thing",
 						State: cty.ObjectVal(map[string]cty.Value{
-							"id":             cty.StringVal(req.ID),
+							"id":             cty.StringVal(req.Target.ID),
 							"import_marker":  configuredMarker,
 							"refresh_marker": cty.NullVal(cty.String), // we'll populate this in ReadResource
 						}),
@@ -318,7 +320,8 @@ resource "aws_instance" "foo" {
   id = "bar"
   var = data.aws_sensitive_data_source.source.value
 }
-`})
+`,
+	})
 
 	ctx := testContext2(t, &ContextOpts{
 		Plugins: plugins.NewLibrary(map[addrs.Provider]providers.Factory{
@@ -734,7 +737,8 @@ resource "aws_instance" "bar" {
 data "aws_data_source" "bar" {
   foo = aws_instance.bar.id
 }
-`})
+`,
+	})
 
 	ctx := testContext2(t, &ContextOpts{
 		Plugins: plugins.NewLibrary(map[addrs.Provider]providers.Factory{
@@ -1236,7 +1240,8 @@ resource "test_resource" "two" {
 
 resource "test_resource" "test" {
 }
-`})
+`,
+	})
 
 	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
 		ResourceTypes: map[string]*configschema.Block{
@@ -1403,9 +1408,260 @@ aws_instance_thing.foo-1:
   provider = provider["registry.opentofu.org/hashicorp/aws"]
 `
 
+func TestContextImport_multiInstanceProviderIdentity(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureImport)
+
+	// This test verifies that identity-based import blocks correctly resolve
+	// the provider instance key when the provider uses for_each and also an alias.
+
+	m := testModuleInline(t, map[string]string{
+		"main.tf": `
+			terraform {
+				required_providers {
+					test = {
+						source = "terraform.io/builtin/test"
+					}
+				}
+			}
+
+			provider "test" {
+				alias = "multi"
+				for_each = {
+					a = {}
+					b = {}
+				}
+
+				marker = each.key
+			}
+
+			resource "test_thing" "test" {
+				for_each = { "foo" = "a" }
+				provider = test.multi[each.value]
+			}
+
+			import {
+				to       = test_thing.test["foo"]
+				identity = {
+					name = "my-resource"
+				}
+				provider = test.multi["a"]
+			}
+		`,
+	})
+
+	identitySchemaObj := &configschema.Object{
+		Attributes: map[string]*configschema.Attribute{
+			"name": {Type: cty.String, Required: true},
+		},
+		Nesting: configschema.NestingSingle,
+	}
+	resourceTypeSchema := providers.Schema{
+		Block: &configschema.Block{
+			Attributes: map[string]*configschema.Attribute{
+				"id": {
+					Type:     cty.String,
+					Computed: true,
+				},
+				"name": {
+					Type:     cty.String,
+					Computed: true,
+				},
+			},
+		},
+		IdentitySchema:        identitySchemaObj,
+		IdentitySchemaVersion: 1,
+	}
+	providerSchema := &providers.GetProviderSchemaResponse{
+		Provider: providers.Schema{
+			Block: &configschema.Block{
+				Attributes: map[string]*configschema.Attribute{
+					"marker": {
+						Type:     cty.String,
+						Required: true,
+					},
+				},
+			},
+		},
+		ResourceTypes: map[string]providers.Schema{
+			"test_thing": resourceTypeSchema,
+		},
+	}
+
+	providerFactory := func() (providers.Interface, error) {
+		ret := &MockProvider{}
+		var configuredMarker cty.Value
+
+		log.Printf("[TRACE] TestContextImport_multiInstanceProviderIdentity: creating new instance of provider 'test' at %p", ret)
+
+		ret.GetProviderSchemaResponse = providerSchema
+		ret.ConfigureProviderFn = func(req providers.ConfigureProviderRequest) providers.ConfigureProviderResponse {
+			configuredMarker = req.Config.GetAttr("marker")
+			log.Printf("[TRACE] TestContextImport_multiInstanceProviderIdentity: ConfigureProvider for %p with marker = %#v", ret, configuredMarker)
+			return providers.ConfigureProviderResponse{}
+		}
+		ret.ImportResourceStateFn = func(req providers.ImportResourceStateRequest) providers.ImportResourceStateResponse {
+			log.Printf("[TRACE] TestContextImport_multiInstanceProviderIdentity: ImportResourceState for %p with marker = %#v", ret, configuredMarker)
+			if configuredMarker == cty.NilVal {
+				return providers.ImportResourceStateResponse{
+					Diagnostics: tfdiags.Diagnostics{}.Append(fmt.Errorf("ImportResourceState before ConfigureProvider")),
+				}
+			}
+			return providers.ImportResourceStateResponse{
+				ImportedResources: []providers.ImportedResource{
+					{
+						TypeName: "test_thing",
+						State: cty.ObjectVal(map[string]cty.Value{
+							"id":   cty.StringVal("imported-123"),
+							"name": configuredMarker,
+						}),
+					},
+				},
+			}
+		}
+		ret.ReadResourceFn = func(req providers.ReadResourceRequest) providers.ReadResourceResponse {
+			log.Printf("[TRACE] TestContextImport_multiInstanceProviderIdentity: ReadResource for %p with marker = %#v", ret, configuredMarker)
+			if configuredMarker == cty.NilVal {
+				return providers.ReadResourceResponse{
+					Diagnostics: tfdiags.Diagnostics{}.Append(fmt.Errorf("ReadResource before ConfigureProvider")),
+				}
+			}
+			return providers.ReadResourceResponse{
+				NewState: cty.ObjectVal(map[string]cty.Value{
+					"id":   req.PriorState.GetAttr("id"),
+					"name": req.PriorState.GetAttr("name"),
+				}),
+			}
+		}
+		return ret, nil
+	}
+
+	ctx := testContext2(t, &ContextOpts{
+		Plugins: plugins.NewLibrary(map[addrs.Provider]providers.Factory{
+			addrs.NewBuiltInProvider("test"): providerFactory,
+		}, nil),
+	})
+
+	plan, diags := ctx.Plan(t.Context(), m, states.NewState(), DefaultPlanOpts)
+	assertNoErrors(t, diags)
+
+	if len(plan.Changes.Resources) == 0 {
+		t.Fatal("expected import to create resource changes")
+	}
+
+	first := plan.Changes.Resources[0]
+	if first.Importing == nil {
+		t.Fatal("expected resource change to be an import")
+	}
+
+	identityType := identitySchemaObj.ImpliedType()
+	decodedIdentity, err := first.Importing.Identity.Decode(identityType)
+	if err != nil {
+		t.Fatalf("failed to decode importing identity: %s", err)
+	}
+
+	expectedIdentity := cty.ObjectVal(map[string]cty.Value{
+		"name": cty.StringVal("my-resource"),
+	})
+
+	if !decodedIdentity.RawEquals(expectedIdentity) {
+		t.Errorf("unexpected imported identity:\ngot:  %#v\nwant: %#v", decodedIdentity, expectedIdentity)
+	}
+}
+
 const testImportRefreshStr = `
 aws_instance.foo:
   ID = foo
   provider = provider["registry.opentofu.org/hashicorp/aws"]
   foo = bar
 `
+
+func TestImportResolverGetImport(t *testing.T) {
+	makeAddr := func(module addrs.ModuleInstance, typeName, name string, key addrs.InstanceKey) addrs.AbsResourceInstance {
+		return module.ResourceInstance(addrs.ManagedResourceMode, typeName, name, key)
+	}
+
+	addrNoKey := makeAddr(addrs.RootModuleInstance, "aws_instance", "foo", addrs.NoKey)
+	addrIntKey := makeAddr(addrs.RootModuleInstance, "aws_instance", "bar", addrs.IntKey(0))
+	addrStringKey := makeAddr(addrs.RootModuleInstance, "aws_sqs_queue", "baz", addrs.StringKey("mykey"))
+	addrInModule := makeAddr(addrs.RootModuleInstance.Child("fruit", addrs.StringKey("apple")), "aws_sqs_queue", "color", addrs.StringKey("red"))
+
+	tests := []struct {
+		name    string
+		imports addrs.Map[addrs.AbsResourceInstance, EvaluatedConfigImportTarget]
+		lookup  addrs.AbsResourceInstance
+		wantID  string
+		wantNil bool
+	}{
+		{
+			name:    "found by address without key",
+			imports: addrs.MakeMap(addrs.MakeMapElem(addrNoKey, EvaluatedConfigImportTarget{Addr: addrNoKey, ID: "i-1234"})),
+			lookup:  addrNoKey,
+			wantID:  "i-1234",
+		},
+		{
+			name:    "found by address with int key",
+			imports: addrs.MakeMap(addrs.MakeMapElem(addrIntKey, EvaluatedConfigImportTarget{Addr: addrIntKey, ID: "i-5678"})),
+			lookup:  addrIntKey,
+			wantID:  "i-5678",
+		},
+		{
+			name:    "found by address with string key",
+			imports: addrs.MakeMap(addrs.MakeMapElem(addrStringKey, EvaluatedConfigImportTarget{Addr: addrStringKey, ID: "queue-url"})),
+			lookup:  addrStringKey,
+			wantID:  "queue-url",
+		},
+		{
+			name:    "found by address in module instance",
+			imports: addrs.MakeMap(addrs.MakeMapElem(addrInModule, EvaluatedConfigImportTarget{Addr: addrInModule, ID: "queue-in-module"})),
+			lookup:  addrInModule,
+			wantID:  "queue-in-module",
+		},
+		{
+			name:    "not found returns nil",
+			imports: addrs.MakeMap(addrs.MakeMapElem(addrNoKey, EvaluatedConfigImportTarget{Addr: addrNoKey, ID: "i-1234"})),
+			lookup:  addrIntKey,
+			wantNil: true,
+		},
+		{
+			name:    "empty resolver returns nil",
+			imports: addrs.MakeMap[addrs.AbsResourceInstance, EvaluatedConfigImportTarget](),
+			lookup:  addrNoKey,
+			wantNil: true,
+		},
+		{
+			name: "correct match among many entries",
+			imports: addrs.MakeMap(
+				addrs.MakeMapElem(addrNoKey, EvaluatedConfigImportTarget{Addr: addrNoKey, ID: "i-1234"}),
+				addrs.MakeMapElem(addrIntKey, EvaluatedConfigImportTarget{Addr: addrIntKey, ID: "i-5678"}),
+				addrs.MakeMapElem(addrStringKey, EvaluatedConfigImportTarget{Addr: addrStringKey, ID: "queue-url"}),
+				addrs.MakeMapElem(addrInModule, EvaluatedConfigImportTarget{Addr: addrInModule, ID: "queue-in-module"}),
+			),
+			lookup: addrStringKey,
+			wantID: "queue-url",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ri := &ImportResolver{imports: tc.imports}
+			got := ri.GetImport(tc.lookup)
+
+			if tc.wantNil {
+				if got != nil {
+					t.Fatalf("expected nil, got %v", got)
+				}
+				return
+			}
+
+			if got == nil {
+				t.Fatal("expected non-nil result, got nil")
+			}
+			if got.ID != tc.wantID {
+				t.Errorf("expected ID %q, got %q", tc.wantID, got.ID)
+			}
+			if !got.Addr.Equal(tc.lookup) {
+				t.Errorf("expected Addr %s, got %s", tc.lookup, got.Addr)
+			}
+		})
+	}
+}

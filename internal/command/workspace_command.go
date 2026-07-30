@@ -28,12 +28,6 @@ func (c *WorkspaceCommand) Run(rawArgs []string) int {
 	// in order to keep functional parity, we setup the view to add a new line after each diagnostic.
 	c.View.DiagsWithNewline()
 
-	// Propagate -no-color for legacy use of Ui. The remote backend and
-	// cloud package use this; it should be removed when/if they are
-	// migrated to views.
-	c.Meta.color = !common.NoColor
-	c.Meta.Color = c.Meta.color
-
 	// Parse and validate flags
 	args, closer, diags := arguments.ParseWorkspace(rawArgs)
 	defer closer()
@@ -41,10 +35,6 @@ func (c *WorkspaceCommand) Run(rawArgs []string) int {
 	// Instantiate the view, even if there are flag errors, so that we render
 	// diagnostics according to the desired view
 	view := views.NewWorkspace(args.ViewOptions, c.View)
-	// ... and initialise the Meta.Ui to wrap Meta.View into a new implementation
-	// that is able to print by using View abstraction and use the Meta.Ui
-	// to ask for the user input.
-	c.Meta.configureUiFromView(args.ViewOptions)
 	if diags.HasErrors() {
 		view.Diagnostics(diags)
 		return cli.RunResultHelp

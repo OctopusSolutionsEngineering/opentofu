@@ -25,24 +25,19 @@ type opCode int
 const (
 	_ = opCode(iota) // the zero value is not a valid operation
 
-	opProviderInstanceConfig
-	opProviderInstanceOpen
-	opProviderInstanceClose
-
+	opResourceInstanceCurrentMeta
 	opResourceInstanceDesired
 	opResourceInstancePrior
 
 	opManagedFinalPlan
 	opManagedApply
-	opManagedDepose
+	opManagedPrepareDepose
+	opManagedPerformDepose
+	opManagedDesposedMeta
 	opManagedAlreadyDeposed
 	opManagedChangeAddr
 
 	opDataRead
-
-	opEphemeralOpen
-	opEphemeralState
-	opEphemeralClose
 )
 
 //go:generate go run golang.org/x/tools/cmd/stringer -type=opCode

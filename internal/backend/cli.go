@@ -6,10 +6,8 @@
 package backend
 
 import (
-	"github.com/mitchellh/cli"
-	"github.com/mitchellh/colorstring"
-
-	"github.com/opentofu/opentofu/internal/terminal"
+	"github.com/opentofu/opentofu/internal/command/arguments"
+	"github.com/opentofu/opentofu/internal/command/views"
 	"github.com/opentofu/opentofu/internal/tofu"
 )
 
@@ -50,27 +48,16 @@ type CLI interface {
 // to error in your backend when an option is set so that users don't make
 // a critically incorrect assumption about behavior.
 type CLIOpts struct {
-	// CLI and Colorize control the CLI output. If CLI is nil then no CLI
-	// output will be done. If CLIColor is nil then no coloring will be done.
-	CLI      cli.Ui
-	CLIColor *colorstring.Colorize
+	// View is used by the remote and cloud backends to print the progress
+	// of their actions.
+	View views.BackendRemote
 
-	// Streams describes the low-level streams for Stdout, Stderr and Stdin,
-	// including some metadata about whether they are terminals. Most output
-	// should go via the object in field CLI above, but Streams can be useful
-	// for tailoring the output to fit the attached terminal, for example.
-	Streams *terminal.Streams
-
-	// StatePath is the local path where state is read from.
-	//
-	// StateOutPath is the local path where the state will be written.
-	// If this is empty, it will default to StatePath.
-	//
-	// StateBackupPath is the local path where a backup file will be written.
-	// If this is empty, no backup will be taken.
-	StatePath       string
-	StateOutPath    string
-	StateBackupPath string
+	// StateArgs carries the state related configurations. Refer to the
+	// arguments.State for more details.
+	// In this particular case, an empty arguments.State#BackupPath will result
+	// in skipping the backup entirely and the new state will just overwrite the old
+	// one.
+	StateArgs arguments.State
 
 	// ContextOpts are the base context options to set when initializing a
 	// OpenTofu context. Many of these will be overridden or merged by

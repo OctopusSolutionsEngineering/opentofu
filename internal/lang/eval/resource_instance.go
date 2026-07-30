@@ -9,7 +9,34 @@ import (
 	"github.com/zclconf/go-cty/cty"
 
 	"github.com/opentofu/opentofu/internal/addrs"
+	"github.com/opentofu/opentofu/internal/lang/eval/internal/configgraph"
+	"github.com/opentofu/opentofu/internal/lang/eval/internal/evalglue"
 )
+
+// ConfiguredResourceInstanceObjectMeta represents the subset of metadata
+// about a resource instance object that comes from the configuration, based
+// on configuration arguments that could potentially vary between language
+// editions.
+//
+// It's up to the specific language edition implementation to decide how to
+// populate an object of this type. Some fields will be based on per-resource
+// or per-resource-instance configuration elements shared across multiple
+// objects, but at this level of abstraction those decisions are already made
+// and we must not assume anything is necessarily shared by objects belonging
+// to the same resource or resource instance.
+//
+// Note that this is NOT what you should use directly in the planning or
+// applying engines as the full metadata for a resource instance object.
+// Instead, this should typically be combined with information taken from the
+// prior state (in a way that's outside the scope of this package) to determine
+// the full effective metadata for an object.
+//
+// The design of this type is biased towards the needs of the "managed" resource
+// mode since that represents our primary functionality and the most complicated
+// set of available metadata features. Nonetheless we do still use this type
+// for other resource modes and just leave the irrelevant fields unpopulated
+// for objects of those modes.
+type ConfiguredResourceInstanceObjectMeta = evalglue.ConfiguredResourceInstanceObjectMeta
 
 // DesiredResourceInstance describes a resource instance that is part of
 // the desired state (i.e. declared in the configuration).
@@ -23,7 +50,7 @@ import (
 // [DesiredResourceInstance.IsPlaceholder] returns true for these placeholder
 // objects.
 //
-// Prior state resouce instances are not represented in this package at all.
+// Prior state resource instances are not represented in this package at all.
 // The plan and apply mechanisms implemented elsewhere are responsible for
 // comparing desired resource instances with prior state resource instances
 // to determine what actions are needed, if any.
@@ -131,17 +158,6 @@ type DesiredResourceInstance struct {
 	// that we can eventually do https://github.com/opentofu/opentofu/issues/2523 .
 	CreateBeforeDestroy bool
 
-	// If RejectDeleteAction is true then the planning phase should return an
-	// error if it would otherwise have planned to destroy any existing object
-	// associated with this resource instance.
-	//
-	// This is meaningful only for resource modes that support the "update"
-	// change action, and so is always false for other modes.
-	//
-	// FIXME: Probably also need an "unknown" representation for this, so
-	// that we can eventually do https://github.com/opentofu/opentofu/issues/2522 .
-	RejectDeleteAction bool
-
 	// ReplaceTriggeredBy describes zero ore more attribute prefixes within
 	// other resource instances for which the planning engine should force
 	// replacement of this resource instance if any value beneath one of
@@ -182,9 +198,11 @@ func (ri *DesiredResourceInstance) IsPlaceholder() bool {
 	return ri.Addr.IsPlaceholder()
 }
 
-// ResourceInstanceAttributePath describes a (possibly empty) attribute path
-// within a resource instance.
-type ResourceInstanceAttributePath struct {
-	ResourceInstance addrs.AbsResourceInstance
-	Path             cty.Path
-}
+// ResourceProvisioner represents a single provisioner configured for a
+// resource instance object.
+type ResourceProvisioner = evalglue.ResourceProvisioner
+
+// FIXME: Don't directly expose a configgraph type here, since that package
+// is supposed to be an implementation detail of tofu2024 and any other future
+// HCL-based language editions.
+type ResourceInstanceAttributePath = configgraph.ResourceInstanceAttributePath

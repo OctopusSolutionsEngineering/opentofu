@@ -7,6 +7,7 @@ package evalglue
 
 import (
 	"testing"
+	"time"
 )
 
 // EvalContext is a collection of contextual information provided by an
@@ -32,11 +33,11 @@ type EvalContext struct {
 
 	// Providers gives access to all of the providers available for use
 	// in this context.
-	Providers ProvidersSchema
+	Providers Providers
 
 	// Provisioners gives access to all of the provisioners available for
 	// use in this context.
-	Provisioners ProvisionersSchema
+	Provisioners Provisioners
 
 	// RootModuleDir and OriginalWorkingDir both represent local filesystem
 	// directories whose paths are exposed in various ways to expressions
@@ -49,6 +50,23 @@ type EvalContext struct {
 	// the "-chdir" command line option, which causes RootModuleDir to change
 	// but leaves OriginalWorkingDir unchanged.
 	RootModuleDir, OriginalWorkingDir string
+
+	// Applying currently wired in via the tofu context shims and does not
+	// represent the final state of how this information should be passed
+	// into the evaluator.
+	//
+	// TODO When we remove the shim, we should try to find a way to prevent
+	// this from disagreeing with the current operation the evaluator is
+	// being asked to perform.
+	Applying bool
+
+	// Workspace is the current tofu workspace passed in from the command
+	// layer
+	Workspace string
+
+	// PlanTimestamp is the time at which the plan was created. This is
+	// used to provide a consistent result for the plantimestamp function.
+	PlanTimestamp time.Time
 }
 
 // AssertValid must be called early on entry to any exported function that

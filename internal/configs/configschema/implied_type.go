@@ -61,6 +61,25 @@ func (b *Block) ContainsSensitive() bool {
 	return false
 }
 
+// ContainsDeprecated returns true if any of the attributes of the receiving
+// block or any of its descendent blocks are marked as deprecated.
+func (b *Block) ContainsDeprecated() bool {
+	for _, attrS := range b.Attributes {
+		if attrS.Deprecated {
+			return true
+		}
+		if attrS.NestedType != nil && attrS.NestedType.ContainsDeprecated() {
+			return true
+		}
+	}
+	for _, blockS := range b.BlockTypes {
+		if blockS.ContainsDeprecated() {
+			return true
+		}
+	}
+	return false
+}
+
 // ContainsMarks is a wrapper around Block.ContainsSensitive which adds
 // another check for the ephemeral nature of the block.
 // The schema attributes cannot be marked as ephemeral, only the whole block
@@ -76,7 +95,7 @@ func (b *Block) ContainsMarks() bool {
 	if b.Ephemeral {
 		return true
 	}
-	return b.ContainsSensitive()
+	return b.ContainsSensitive() || b.ContainsDeprecated()
 }
 
 // ImpliedType returns the cty.Type that would result from decoding a Block's
@@ -88,7 +107,7 @@ func (b *Block) ContainsMarks() bool {
 // cause this method to fall back on defaults and assumptions.
 func (a *Attribute) ImpliedType() cty.Type {
 	if a.NestedType != nil {
-		return a.NestedType.specType().WithoutOptionalAttributesDeep()
+		return a.NestedType.SpecType().WithoutOptionalAttributesDeep()
 	}
 	return a.Type
 }
@@ -101,12 +120,12 @@ func (a *Attribute) ImpliedType() cty.Type {
 // using the InternalValidate method to detect any inconsistencies that would
 // cause this method to fall back on defaults and assumptions.
 func (o *Object) ImpliedType() cty.Type {
-	return o.specType().WithoutOptionalAttributesDeep()
+	return o.SpecType().WithoutOptionalAttributesDeep()
 }
 
-// specType returns the cty.Type used for decoding a NestedType Attribute using
+// SpecType returns the cty.Type used for decoding a NestedType Attribute using
 // the receiving block schema.
-func (o *Object) specType() cty.Type {
+func (o *Object) SpecType() cty.Type {
 	if o == nil {
 		return cty.EmptyObject
 	}
@@ -114,7 +133,7 @@ func (o *Object) specType() cty.Type {
 	attrTys := make(map[string]cty.Type, len(o.Attributes))
 	for name, attrS := range o.Attributes {
 		if attrS.NestedType != nil {
-			attrTys[name] = attrS.NestedType.specType()
+			attrTys[name] = attrS.NestedType.SpecType()
 		} else {
 			attrTys[name] = attrS.Type
 		}
@@ -149,6 +168,20 @@ func (o *Object) ContainsSensitive() bool {
 			return true
 		}
 		if attrS.NestedType != nil && attrS.NestedType.ContainsSensitive() {
+			return true
+		}
+	}
+	return false
+}
+
+// ContainsDeprecated returns true if any of the attributes of the receiving
+// Object are marked as deprecated.
+func (o *Object) ContainsDeprecated() bool {
+	for _, attrS := range o.Attributes {
+		if attrS.Deprecated {
+			return true
+		}
+		if attrS.NestedType != nil && attrS.NestedType.ContainsDeprecated() {
 			return true
 		}
 	}

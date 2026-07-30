@@ -69,7 +69,7 @@ type Hook interface {
 	PostProvisionInstance(addr addrs.AbsResourceInstance, state cty.Value) (HookAction, error)
 	PreProvisionInstanceStep(addr addrs.AbsResourceInstance, typeName string) (HookAction, error)
 	PostProvisionInstanceStep(addr addrs.AbsResourceInstance, typeName string, err error) (HookAction, error)
-	ProvisionOutput(addr addrs.AbsResourceInstance, typeName string, line string)
+	ProvisionOutput(addr addrs.AbsResourceInstance, typeName string, line string, configMarks cty.ValueMarks)
 
 	// PreRefresh and PostRefresh are called before and after a single
 	// resource state is refreshed, respectively.
@@ -84,7 +84,7 @@ type Hook interface {
 
 	// PrePlanImport and PostPlanImport are called during a plan before and after planning to import
 	// a new resource using the configuration-driven import workflow.
-	PrePlanImport(addr addrs.AbsResourceInstance, importID string) (HookAction, error)
+	PrePlanImport(addr addrs.AbsResourceInstance, importID providers.ImportTarget) (HookAction, error)
 	PostPlanImport(addr addrs.AbsResourceInstance, imported []providers.ImportedResource) (HookAction, error)
 
 	// PreApplyImport and PostApplyImport are called during an apply for each imported resource when
@@ -178,7 +178,7 @@ func (*NilHook) PostProvisionInstanceStep(addr addrs.AbsResourceInstance, typeNa
 	return HookActionContinue, nil
 }
 
-func (*NilHook) ProvisionOutput(addr addrs.AbsResourceInstance, typeName string, line string) {
+func (*NilHook) ProvisionOutput(addr addrs.AbsResourceInstance, typeName string, line string, configMarks cty.ValueMarks) {
 }
 
 func (*NilHook) PreRefresh(addr addrs.AbsResourceInstance, gen states.Generation, priorState cty.Value) (HookAction, error) {
@@ -197,7 +197,7 @@ func (*NilHook) PostImportState(addr addrs.AbsResourceInstance, imported []provi
 	return HookActionContinue, nil
 }
 
-func (h *NilHook) PrePlanImport(addr addrs.AbsResourceInstance, importID string) (HookAction, error) {
+func (h *NilHook) PrePlanImport(addr addrs.AbsResourceInstance, target providers.ImportTarget) (HookAction, error) {
 	return HookActionContinue, nil
 }
 

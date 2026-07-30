@@ -400,7 +400,7 @@ func buildSSHClientConfig(opts sshClientConfigOpts) (*ssh.ClientConfig, error) {
 func signCertWithPrivateKey(pk string, certificate string) (ssh.AuthMethod, error) {
 	rawPk, err := ssh.ParseRawPrivateKey([]byte(pk))
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse private key %q: %w", pk, err)
+		return nil, fmt.Errorf("failed to parse private key: %w", err)
 	}
 
 	// golang.org/x/crypto/ssh does not expose certificate parsing as a
@@ -409,7 +409,7 @@ func signCertWithPrivateKey(pk string, certificate string) (ssh.AuthMethod, erro
 	// guaranteed to be a certificate.
 	maybeCert, _, _, _, err := ssh.ParseAuthorizedKey([]byte(certificate))
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse certificate %q: %w", certificate, err)
+		return nil, fmt.Errorf("failed to parse certificate: %w", err)
 	}
 	cert, ok := maybeCert.(*ssh.Certificate)
 	if !ok {
@@ -430,12 +430,12 @@ func signCertWithPrivateKey(pk string, certificate string) (ssh.AuthMethod, erro
 
 	usigner, err := ssh.NewSignerFromKey(rawPk)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create signer from raw private key %q: %w", rawPk, err)
+		return nil, fmt.Errorf("failed to create signer from private key: %w", err)
 	}
 
 	ucertSigner, err := ssh.NewCertSigner(cert, usigner)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create cert signer %q: %w", usigner, err)
+		return nil, fmt.Errorf("failed to create cert signer: %w", err)
 	}
 
 	return ssh.PublicKeys(ucertSigner), nil
@@ -490,12 +490,12 @@ type sshAgent struct {
 	id    string
 }
 
-func (a *sshAgent) Close() error {
-	if a.conn == nil {
+func (s *sshAgent) Close() error {
+	if s.conn == nil {
 		return nil
 	}
 
-	return a.conn.Close()
+	return s.conn.Close()
 }
 
 // make an attempt to either read the identity file or find a corresponding
@@ -610,10 +610,10 @@ func (s *sshAgent) Signers() ([]ssh.Signer, error) {
 	return signers, nil
 }
 
-func (a *sshAgent) Auth() ssh.AuthMethod {
-	return ssh.PublicKeysCallback(a.Signers)
+func (s *sshAgent) Auth() ssh.AuthMethod {
+	return ssh.PublicKeysCallback(s.Signers)
 }
 
-func (a *sshAgent) ForwardToAgent(client *ssh.Client) error {
-	return agent.ForwardToAgent(client, a.agent)
+func (s *sshAgent) ForwardToAgent(client *ssh.Client) error {
+	return agent.ForwardToAgent(client, s.agent)
 }

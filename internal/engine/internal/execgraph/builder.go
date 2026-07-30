@@ -93,46 +93,62 @@ func (b *Builder) ConstantProviderInstAddr(addr addrs.AbsProviderInstanceCorrect
 	return ret
 }
 
-// ProviderInstanceConfig registers an operation for evaluating the
-// configuration for a provider instance.
-func (b *Builder) ProviderInstanceConfig(addrRef ResultRef[addrs.AbsProviderInstanceCorrect], waitFor AnyResultRef) ResultRef[*exec.ProviderInstanceConfig] {
-	waiter := b.ensureWaiterRef(waitFor)
-	return operationRef[*exec.ProviderInstanceConfig](b, operationDesc{
-		opCode:   opProviderInstanceConfig,
-		operands: []AnyResultRef{addrRef, waiter},
-	})
-}
-
-// ProviderInstanceOpen registers an operation for opening a client for a
-// particular provider instance.
-func (b *Builder) ProviderInstanceOpen(config ResultRef[*exec.ProviderInstanceConfig]) ResultRef[*exec.ProviderClient] {
-	return operationRef[*exec.ProviderClient](b, operationDesc{
-		opCode:   opProviderInstanceOpen,
-		operands: []AnyResultRef{config},
-	})
-}
-
-// ProviderInstanceClose registers an operation for closing a provider client
-// that was previously opened through [Builder.OpenProviderInstance].
-func (b *Builder) ProviderInstanceClose(client ResultRef[*exec.ProviderClient], waitFor AnyResultRef) ResultRef[struct{}] {
-	waiter := b.ensureWaiterRef(waitFor)
-	return operationRef[struct{}](b, operationDesc{
-		opCode:   opProviderInstanceClose,
-		operands: []AnyResultRef{client, waiter},
-	})
-}
-
-func (b *Builder) ResourceInstanceDesired(
+// ResourceInstanceCurrentMeta asks the evaluator for the configured metadata
+// for the current object of the identified resource instance and then combines
+// it with the prior state of that object (if any) to produce the effective
+// metadata for that resource instance object.
+//
+// For objects that exist in the prior state, set "prior" to the result of a
+// call to [Builder.ResourceInstancePrior]. Otherwise leave it set to nil to
+// indicate that there is no prior state available.
+func (b *Builder) ResourceInstanceCurrentMeta(
 	addr ResultRef[addrs.AbsResourceInstance],
-	waitFor AnyResultRef,
+	prior ResourceInstanceResultRef,
+) ResultRef[*exec.ResourceInstanceObjectMeta] {
+	return operationRef[*exec.ResourceInstanceObjectMeta](b, operationDesc{
+		opCode:   opResourceInstanceCurrentMeta,
+		operands: []AnyResultRef{addr, prior},
+	})
+}
+
+// ResourceInstanceDesired asks the evaluator for the desired state of the
+// resource instance object whose metadata is provided.
+//
+// This operation automatically blocks awaiting the results of any upstream
+// resource instances that the requested instance's configuration depends on,
+// and prevents execution of anything that depends on its result if there
+// are any evaluation errors, even if those errors originate upstream in one
+// of the configuration's dependencies and thus would get reported separately
+// by another return path.
+//
+// Only current (i.e. not "deposed") objects can be "desired", so this operation
+// must not be sent a result from [Builder.ManagedDeposedMeta].
+func (b *Builder) ResourceInstanceDesired(
+	meta ResultRef[*exec.ResourceInstanceObjectMeta],
 ) ResultRef[*eval.DesiredResourceInstance] {
-	waiter := b.ensureWaiterRef(waitFor)
 	return operationRef[*eval.DesiredResourceInstance](b, operationDesc{
 		opCode:   opResourceInstanceDesired,
-		operands: []AnyResultRef{addr, waiter},
+		operands: []AnyResultRef{meta},
 	})
 }
 
+// ResourceInstancePrior returns the prior state of the resource instance that
+// has the given address.
+//
+// If the instance has no current object in the prior state then this returns
+// an object whose value is null, but not that such an object is not an
+// acceptable input to all operations that accept resource instance results,
+// and we expect that the planning engine would just skip including this
+// operation completely for any resource instance which is known during planning
+// to have no prior state because it's being created.
+//
+// Because this operation just reads static values directly from the state, it
+// does not automatically block for the completion of changes for other resource
+// instances recorded as dependencies in the prior state. Instead we expect that
+// the planning engine would record those as explicit dependencies on a
+// subsequent call to [Builder.ManagedApply] or [Builder.ManagedPerformDepose]
+// so that we constrain the ordering only of the externally-visible changes
+// and not of internal-only work.
 func (b *Builder) ResourceInstancePrior(
 	addr ResultRef[addrs.AbsResourceInstance],
 ) ResourceInstanceResultRef {
@@ -159,14 +175,14 @@ func (b *Builder) ResourceInstancePrior(
 // and the other has a nil priorState. desiredInst and priorState should only
 // both be set when handling an in-place update.
 func (b *Builder) ManagedFinalPlan(
+	metadata ResultRef[*exec.ResourceInstanceObjectMeta],
 	desiredInst ResultRef[*eval.DesiredResourceInstance],
 	priorState ResourceInstanceResultRef,
 	plannedVal ResultRef[cty.Value],
-	providerClient ResultRef[*exec.ProviderClient],
 ) ResultRef[*exec.ManagedResourceObjectFinalPlan] {
 	return operationRef[*exec.ManagedResourceObjectFinalPlan](b, operationDesc{
 		opCode:   opManagedFinalPlan,
-		operands: []AnyResultRef{desiredInst, priorState, plannedVal, providerClient},
+		operands: []AnyResultRef{metadata, desiredInst, priorState, plannedVal},
 	})
 }
 
@@ -178,27 +194,65 @@ func (b *Builder) ManagedFinalPlan(
 //
 // fallbackObj is usually a [NilResultRef], but should be set for the "create"
 // leg of a "create then destroy" replace operation to be the result of a
-// call to [Builder.ManagedDepose] so that the deposed object can be restored
-// to current if the create call completely fails to create a new object.
+// call to [Builder.ManagedPerformDepose] so that the deposed object can be
+// restored to current if the create call completely fails to create a new
+// object.
 func (b *Builder) ManagedApply(
 	finalPlan ResultRef[*exec.ManagedResourceObjectFinalPlan],
 	fallbackObj ResourceInstanceResultRef,
-	providerClient ResultRef[*exec.ProviderClient],
 	waitFor AnyResultRef,
 ) ResourceInstanceResultRef {
+	waiter := b.ensureWaiterRef(waitFor)
 	return operationRef[*exec.ResourceInstanceObject](b, operationDesc{
 		opCode:   opManagedApply,
-		operands: []AnyResultRef{finalPlan, fallbackObj, providerClient, waitFor},
+		operands: []AnyResultRef{finalPlan, fallbackObj, waiter},
 	})
 }
 
-func (b *Builder) ManagedDepose(
+// ManagedPrepareDepose performs the first half of the work to "depose" a
+// resource instance object as part of a create-before-destroy replace
+// operation.
+//
+// The final plan given as input must be a plan to destroy a "current" object.
+// The result is an equivalent plan whose only difference is that it's set
+// up to destroy the deposed object which has the given deposed key.
+//
+// The result of this operation should then be sent to both
+// [Builder.ManagedPerformDepose] and [Builder.ManagedApply] as part of the
+// overall subgraph handling the replace operation.
+//
+// This operation is an intrinsic, meaning that its behavior lives directly
+// in the execution graph runner rather than being delegated to an external
+// [exec.Operations] implementation.
+func (b *Builder) ManagedPrepareDepose(
+	finalPlan ResultRef[*exec.ManagedResourceObjectFinalPlan],
+	deposedKey ResultRef[addrs.DeposedKey],
+) ResultRef[*exec.ManagedResourceObjectFinalPlan] {
+	return operationRef[*exec.ManagedResourceObjectFinalPlan](b, operationDesc{
+		opCode:   opManagedPrepareDepose,
+		operands: []AnyResultRef{finalPlan, deposedKey},
+	})
+}
+
+func (b *Builder) ManagedPerformDepose(
 	currentObj ResourceInstanceResultRef,
+	finalDeletePlan ResultRef[*exec.ManagedResourceObjectFinalPlan],
 	waitFor AnyResultRef,
 ) ResourceInstanceResultRef {
 	return operationRef[*exec.ResourceInstanceObject](b, operationDesc{
-		opCode:   opManagedDepose,
-		operands: []AnyResultRef{currentObj, waitFor},
+		opCode:   opManagedPerformDepose,
+		operands: []AnyResultRef{currentObj, finalDeletePlan, waitFor},
+	})
+}
+
+func (b *Builder) ManagedDeposedMeta(
+	instAddr ResultRef[addrs.AbsResourceInstance],
+	deposedKey ResultRef[states.DeposedKey],
+	prior ResourceInstanceResultRef,
+) ResultRef[*exec.ResourceInstanceObjectMeta] {
+	return operationRef[*exec.ResourceInstanceObjectMeta](b, operationDesc{
+		opCode:   opManagedDesposedMeta,
+		operands: []AnyResultRef{instAddr, deposedKey, prior},
 	})
 }
 
@@ -223,43 +277,15 @@ func (b *Builder) ManagedChangeAddr(
 }
 
 func (b *Builder) DataRead(
+	metadata ResultRef[*exec.ResourceInstanceObjectMeta],
 	desiredInst ResultRef[*eval.DesiredResourceInstance],
 	plannedVal ResultRef[cty.Value],
-	providerClient ResultRef[*exec.ProviderClient],
+	waitFor AnyResultRef,
 ) ResourceInstanceResultRef {
+	waiter := b.ensureWaiterRef(waitFor)
 	return operationRef[*exec.ResourceInstanceObject](b, operationDesc{
 		opCode:   opDataRead,
-		operands: []AnyResultRef{desiredInst, plannedVal, providerClient},
-	})
-}
-
-func (b *Builder) EphemeralOpen(
-	desiredInst ResultRef[*eval.DesiredResourceInstance],
-	providerClient ResultRef[*exec.ProviderClient],
-) ResultRef[*exec.OpenEphemeralResourceInstance] {
-	return operationRef[*exec.OpenEphemeralResourceInstance](b, operationDesc{
-		opCode:   opEphemeralOpen,
-		operands: []AnyResultRef{desiredInst, providerClient},
-	})
-}
-
-func (b *Builder) EphemeralState(
-	ephemeralInst ResultRef[*exec.OpenEphemeralResourceInstance],
-) ResourceInstanceResultRef {
-	return operationRef[*exec.ResourceInstanceObject](b, operationDesc{
-		opCode:   opEphemeralState,
-		operands: []AnyResultRef{ephemeralInst},
-	})
-}
-
-func (b *Builder) EphemeralClose(
-	ephemeralInst ResultRef[*exec.OpenEphemeralResourceInstance],
-	waitFor AnyResultRef,
-) ResultRef[struct{}] {
-	waiter := b.ensureWaiterRef(waitFor)
-	return operationRef[struct{}](b, operationDesc{
-		opCode:   opEphemeralClose,
-		operands: []AnyResultRef{ephemeralInst, waiter},
+		operands: []AnyResultRef{metadata, desiredInst, plannedVal, waiter},
 	})
 }
 

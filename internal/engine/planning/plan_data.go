@@ -21,10 +21,20 @@ import (
 func (p *planGlue) planDesiredDataResourceInstance(ctx context.Context, inst *eval.DesiredResourceInstance) (*resourceInstanceObject, tfdiags.Diagnostics) {
 	var diags tfdiags.Diagnostics
 
+	tracer := contextTracer(ctx)
+	if cb := tracer.StartDataResourceInstancePlanning; cb != nil {
+		ctx = cb(ctx, inst.Addr)
+	}
+	if cb := tracer.EndDataResourceInstancePlanning; cb != nil {
+		defer func() { // closure to delay evaluating diags until we return
+			cb(ctx, inst.Addr, diags)
+		}()
+	}
+
 	ret := &resourceInstanceObject{
-		Addr:         inst.Addr.CurrentObject(),
-		Dependencies: addrs.MakeSet[addrs.AbsResourceInstanceObject](),
-		Provider:     inst.Provider,
+		Addr:               inst.Addr.CurrentObject(),
+		ConfigDependencies: addrs.MakeSet[addrs.AbsResourceInstanceObject](),
+		Provider:           inst.Provider,
 
 		// We'll start off with a completely-unknown placeholder value, but
 		// we might refine this to be more specific as we learn more below.
@@ -36,10 +46,13 @@ func (p *planGlue) planDesiredDataResourceInstance(ctx context.Context, inst *ev
 		// when no planned change is present.
 	}
 	for dep := range inst.RequiredResourceInstances.All() {
-		ret.Dependencies.Add(dep.CurrentObject())
+		ret.ConfigDependencies.Add(dep.CurrentObject())
 	}
 
-	validateDiags := p.planCtx.providers.ValidateResourceConfig(ctx, inst.Provider, inst.ResourceMode, inst.ResourceType, inst.ConfigVal)
+	unmarkedConfigVal, _ := inst.ConfigVal.UnmarkDeep()
+
+	// TODO resourceType.ValidateConfig
+	validateDiags := p.planCtx.providers.ValidateResourceConfig(ctx, inst.Provider, inst.ResourceMode, inst.ResourceType, unmarkedConfigVal)
 	diags = diags.Append(validateDiags)
 	if diags.HasErrors() {
 		return ret, diags
@@ -82,9 +95,13 @@ func (p *planGlue) planDesiredDataResourceInstance(ctx context.Context, inst *ev
 		return ret, diags
 	}
 
-	resp := providerClient.ReadDataSource(ctx, providers.ReadDataSourceRequest{
+	readCtx := ctx
+	if cb := tracer.StartDataResourceInstanceRead; cb != nil {
+		readCtx = cb(ctx, inst.Addr)
+	}
+	resp := providerClient.ReadDataSource(readCtx, providers.ReadDataSourceRequest{
 		TypeName: inst.ResourceType,
-		Config:   inst.ConfigVal,
+		Config:   unmarkedConfigVal,
 
 		// TODO: ProviderMeta is a rarely-used feature that only really makes
 		// sense when the module and provider are both written by the same
@@ -95,6 +112,15 @@ func (p *planGlue) planDesiredDataResourceInstance(ctx context.Context, inst *ev
 		ProviderMeta: cty.NullVal(cty.DynamicPseudoType),
 	})
 	diags = diags.Append(resp.Diagnostics)
+	if cb := tracer.EndDataResourceInstanceRead; cb != nil {
+		resultVal := cty.DynamicVal
+		if resp.State != cty.NilVal {
+			// TODO: Should apply "sensitive" marks here where appropriate in
+			// case the tracer is reporting events in the UI.
+			resultVal = resp.State
+		}
+		cb(readCtx, inst.Addr, resultVal, diags)
+	}
 	if resp.Diagnostics.HasErrors() {
 		return ret, diags
 	}
@@ -120,9 +146,9 @@ func (p *planGlue) planOrphanDataResourceInstance(_ context.Context, addr addrs.
 	p.planCtx.refreshedState.RemoveResourceInstanceObjectFull(addr.CurrentObject(), state.ProviderInstanceAddr)
 
 	return &resourceInstanceObject{
-		Addr:             addr.CurrentObject(),
-		Dependencies:     addrs.MakeSet[addrs.AbsResourceInstanceObject](),
-		Provider:         state.ProviderInstanceAddr.Config.Config.Provider,
-		PlaceholderValue: cty.NullVal(cty.DynamicPseudoType),
+		Addr:               addr.CurrentObject(),
+		ConfigDependencies: addrs.MakeSet[addrs.AbsResourceInstanceObject](),
+		Provider:           state.ProviderInstanceAddr.Config.Config.Provider,
+		PlaceholderValue:   cty.NullVal(cty.DynamicPseudoType),
 	}, diags
 }

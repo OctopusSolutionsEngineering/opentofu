@@ -16,7 +16,6 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/mitchellh/cli"
 	"github.com/opentofu/opentofu/internal/command/workdir"
 	"github.com/zclconf/go-cty/cty"
 
@@ -301,7 +300,6 @@ func TestValidateWithInvalidTestModule(t *testing.T) {
 
 	streams, done := terminal.StreamsForTesting(t)
 	view := views.NewView(streams)
-	ui := new(cli.MockUi)
 
 	provider := testing_command.NewProvider(nil)
 
@@ -313,9 +311,7 @@ func TestValidateWithInvalidTestModule(t *testing.T) {
 	meta := Meta{
 		WorkingDir:       workdir.NewDir("."),
 		testingOverrides: metaOverridesForProvider(provider.Provider),
-		Ui:               ui,
 		View:             view,
-		Streams:          streams,
 		ProviderSource:   providerSource,
 	}
 
@@ -323,10 +319,15 @@ func TestValidateWithInvalidTestModule(t *testing.T) {
 		Meta: meta,
 	}
 
-	if code := init.Run(nil); code != 0 {
-		t.Fatalf("expected status code 0 but got %d: %s", code, ui.ErrorWriter)
+	code := init.Run(nil)
+	output := done(t)
+	if code != 0 {
+		t.Fatalf("expected status code 0 but got %d: %s", code, output.Stderr())
 	}
 
+	streams, done = terminal.StreamsForTesting(t)
+	view = views.NewView(streams)
+	meta.View = view
 	c := &ValidateCommand{
 		Meta: meta,
 	}
@@ -334,8 +335,8 @@ func TestValidateWithInvalidTestModule(t *testing.T) {
 	var args []string
 	args = append(args, "-no-color")
 
-	code := c.Run(args)
-	output := done(t)
+	code = c.Run(args)
+	output = done(t)
 
 	if code != 1 {
 		t.Fatalf("Should have failed: %d\n\n%s", code, output.Stderr())
@@ -375,7 +376,7 @@ func TestValidate_json(t *testing.T) {
 				return field == `["filename"]`
 			},
 			//
-			cmp.Transformer("filename", func(filename interface{}) string {
+			cmp.Transformer("filename", func(filename any) string {
 				convertedFilename, ok := filename.(string)
 				if !ok {
 					t.Fatalf("failed to convert filename to string: %v", filename)
@@ -390,7 +391,7 @@ func TestValidate_json(t *testing.T) {
 				field := p.Last().String()
 				return field == `["detail"]`
 			},
-			cmp.Transformer("detail", func(detail interface{}) string {
+			cmp.Transformer("detail", func(detail any) string {
 				convertedDetail, ok := detail.(string)
 				if !ok {
 					t.Fatalf("failed to convert detail to string: %v", detail)
@@ -405,7 +406,7 @@ func TestValidate_json(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.path, func(t *testing.T) {
-			var want, got map[string]interface{}
+			var want, got map[string]any
 
 			wantFile, err := os.Open(path.Join(testFixturePath(tc.path), "output.json"))
 			if err != nil {

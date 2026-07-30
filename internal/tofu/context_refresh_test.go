@@ -26,6 +26,8 @@ import (
 )
 
 func TestContext2Refresh(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureRefresh)
+
 	p := testProvider("aws")
 	m := testModule(t, "refresh-basic")
 
@@ -84,6 +86,8 @@ func TestContext2Refresh(t *testing.T) {
 }
 
 func TestContext2Refresh_dynamicAttr(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureRefresh)
+
 	m := testModule(t, "refresh-dynamic")
 
 	startingState := states.BuildState(func(ss *states.SyncState) {
@@ -159,6 +163,8 @@ func TestContext2Refresh_dynamicAttr(t *testing.T) {
 }
 
 func TestContext2Refresh_dataComputedModuleVar(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureRefresh)
+
 	p := testProvider("aws")
 	m := testModule(t, "refresh-data-module-var")
 	p.PlanResourceChangeFn = func(req providers.PlanResourceChangeRequest) (resp providers.PlanResourceChangeResponse) {
@@ -221,6 +227,8 @@ func TestContext2Refresh_dataComputedModuleVar(t *testing.T) {
 }
 
 func TestContext2Refresh_targeted(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureTarget)
+
 	p := testProvider("aws")
 	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
 		Provider: &configschema.Block{},
@@ -306,6 +314,8 @@ func TestContext2Refresh_targeted(t *testing.T) {
 // Usually that test exists right before the exclude flag test
 
 func TestContext2Refresh_excluded(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureTarget)
+
 	p := testProvider("aws")
 	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
 		Provider: &configschema.Block{},
@@ -390,6 +400,8 @@ func TestContext2Refresh_excluded(t *testing.T) {
 }
 
 func TestContext2Refresh_targetedCount(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureTarget)
+
 	p := testProvider("aws")
 	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
 		Provider: &configschema.Block{},
@@ -480,6 +492,8 @@ func TestContext2Refresh_targetedCount(t *testing.T) {
 }
 
 func TestContext2Refresh_excludedCount(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureTarget)
+
 	p := testProvider("aws")
 	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
 		Provider: &configschema.Block{},
@@ -571,6 +585,8 @@ func TestContext2Refresh_excludedCount(t *testing.T) {
 }
 
 func TestContext2Refresh_targetedCountIndex(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureTarget)
+
 	p := testProvider("aws")
 	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
 		Provider: &configschema.Block{},
@@ -655,6 +671,8 @@ func TestContext2Refresh_targetedCountIndex(t *testing.T) {
 }
 
 func TestContext2Refresh_excludedCountIndex(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureTarget)
+
 	p := testProvider("aws")
 	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
 		Provider: &configschema.Block{},
@@ -776,6 +794,8 @@ func TestContext2Refresh_moduleComputedVar(t *testing.T) {
 }
 
 func TestContext2Refresh_delete(t *testing.T) {
+	SkipExperimental(t, ExperimentalBugResourceReadNull)
+
 	p := testProvider("aws")
 	m := testModule(t, "refresh-basic")
 
@@ -829,6 +849,8 @@ func TestContext2Refresh_ignoreUncreated(t *testing.T) {
 }
 
 func TestContext2Refresh_hook(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureRefresh, ExperimentalFeatureHooks)
+
 	h := new(MockHook)
 	p := testProvider("aws")
 	m := testModule(t, "refresh-basic")
@@ -894,6 +916,8 @@ func TestContext2Refresh_modules(t *testing.T) {
 		t.Fatalf("refresh errors: %s", diags.Err())
 	}
 
+	SkipExperimental(t, ExperimentalFeatureRefresh)
+
 	actual := strings.TrimSpace(s.String())
 	expected := strings.TrimSpace(testContextRefreshModuleStr)
 	if actual != expected {
@@ -902,6 +926,7 @@ func TestContext2Refresh_modules(t *testing.T) {
 }
 
 func TestContext2Refresh_moduleInputComputedOutput(t *testing.T) {
+	SkipExperimental(t, ExperimentalBugVariableInput)
 	m := testModule(t, "refresh-module-input-computed-output")
 	p := testProvider("aws")
 	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
@@ -935,6 +960,8 @@ func TestContext2Refresh_moduleInputComputedOutput(t *testing.T) {
 }
 
 func TestContext2Refresh_moduleVarModule(t *testing.T) {
+	SkipExperimental(t, ExperimentalBugDeclareProvider, ExperimentalBugVariableInput)
+
 	m := testModule(t, "refresh-module-var-module")
 	p := testProvider("aws")
 	ctx := testContext2(t, &ContextOpts{
@@ -970,6 +997,8 @@ func TestContext2Refresh_noState(t *testing.T) {
 }
 
 func TestContext2Refresh_output(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureRefresh)
+
 	p := testProvider("aws")
 	p.PlanResourceChangeFn = testDiffFn
 	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
@@ -1017,6 +1046,8 @@ func TestContext2Refresh_output(t *testing.T) {
 }
 
 func TestContext2Refresh_outputPartial(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureRefresh)
+
 	p := testProvider("aws")
 	m := testModule(t, "refresh-output-partial")
 
@@ -1065,6 +1096,8 @@ func TestContext2Refresh_outputPartial(t *testing.T) {
 }
 
 func TestContext2Refresh_stateBasic(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureRefresh)
+
 	p := testProvider("aws")
 	m := testModule(t, "refresh-basic")
 
@@ -1205,6 +1238,8 @@ func TestContext2Refresh_dataState(t *testing.T) {
 
 	mod := s.RootModule()
 
+	SkipExperimental(t, ExperimentalFeatureRefresh)
+
 	newState, err := mod.Resources["data.null_data_source.testing"].Instances[addrs.NoKey].Current.Decode(schema.ImpliedType())
 	if err != nil {
 		t.Fatal(err)
@@ -1216,6 +1251,8 @@ func TestContext2Refresh_dataState(t *testing.T) {
 }
 
 func TestContext2Refresh_dataStateRefData(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureRefresh)
+
 	p := testProvider("null")
 	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
 		Provider: &configschema.Block{},
@@ -1270,6 +1307,8 @@ func TestContext2Refresh_dataStateRefData(t *testing.T) {
 }
 
 func TestContext2Refresh_tainted(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureRefresh)
+
 	p := testProvider("aws")
 	m := testModule(t, "refresh-basic")
 
@@ -1334,6 +1373,7 @@ func TestContext2Refresh_unknownProvider(t *testing.T) {
 }
 
 func TestContext2Refresh_vars(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureRefresh)
 	p := testProvider("aws")
 
 	schema := &configschema.Block{
@@ -1410,6 +1450,7 @@ func TestContext2Refresh_vars(t *testing.T) {
 }
 
 func TestContext2Refresh_orphanModule(t *testing.T) {
+	SkipExperimental(t, ExperimentalBugDeclareProvider, ExperimentalBugStateProvider)
 	p := testProvider("aws")
 	m := testModule(t, "refresh-module-orphan")
 
@@ -1509,6 +1550,8 @@ func TestContext2Validate(t *testing.T) {
 }
 
 func TestContext2Refresh_updateProviderInState(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureUpgradeState)
+
 	m := testModule(t, "update-resource-provider")
 	p := testProvider("aws")
 
@@ -1539,6 +1582,8 @@ aws_instance.bar:
 }
 
 func TestContext2Refresh_schemaUpgradeFlatmap(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureUpgradeState, ExperimentalObsoleteFlatAttrs)
+
 	m := testModule(t, "refresh-schema-upgrade")
 	p := testProvider("test")
 	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
@@ -1624,6 +1669,8 @@ test_thing.bar:
 }
 
 func TestContext2Refresh_schemaUpgradeJSON(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureUpgradeState)
+
 	m := testModule(t, "refresh-schema-upgrade")
 	p := testProvider("test")
 	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
@@ -1785,6 +1832,7 @@ func TestContext2Refresh_dataResourceDependsOn(t *testing.T) {
 
 // verify that create_before_destroy is updated in the state during refresh
 func TestRefresh_updateLifecycle(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureCBD)
 	state := states.NewState()
 	root := state.EnsureModule(addrs.RootModuleInstance)
 	root.SetResourceInstanceCurrent(
@@ -1827,6 +1875,7 @@ resource "aws_instance" "bar" {
 		t.Fatalf("plan errors: %s", diags.Err())
 	}
 
+	SkipExperimental(t, ExperimentalBugStateCBD)
 	r := state.ResourceInstance(mustResourceInstanceAddr("aws_instance.bar"))
 	if !r.Current.CreateBeforeDestroy {
 		t.Fatal("create_before_destroy not updated in instance state")
@@ -1887,6 +1936,8 @@ func TestContext2Refresh_dataSourceOrphan(t *testing.T) {
 // the diff output and unexpected behavior with ignore_changes. Make sure
 // refresh fixes these up before storing the state.
 func TestContext2Refresh_reifyNullBlock(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureRefresh)
+
 	m := testModuleInline(t, map[string]string{
 		"main.tf": `
 resource "test_resource" "foo" {

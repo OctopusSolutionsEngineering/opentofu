@@ -32,7 +32,7 @@ func TestApply_new(t *testing.T) {
 		t.Fatalf("unexpected destroy value")
 	}
 
-	if hv.inAutomation != true {
+	if hv.view.runningInAutomation != true { // redundant but changed a more relevant check that was here before
 		t.Fatalf("unexpected inAutomation value")
 	}
 }
@@ -76,7 +76,7 @@ func TestApplyHuman_operation(t *testing.T) {
 	v := NewApply(arguments.ViewOptions{ViewType: arguments.ViewHuman}, false, NewView(streams).SetRunningInAutomation(true)).Operation()
 	if hv, ok := v.(*OperationHuman); !ok {
 		t.Fatalf("unexpected return type %t", v)
-	} else if hv.inAutomation != true {
+	} else if hv.view.runningInAutomation != true { // redundant but it replaces a previously more relevant check
 		t.Fatalf("unexpected inAutomation value on Operation view")
 	}
 }
@@ -263,19 +263,19 @@ func TestApplyJSON_outputs(t *testing.T) {
 		"password":   {Value: cty.StringVal("horse-battery").Mark(marks.Sensitive), Sensitive: true},
 	})
 
-	want := []map[string]interface{}{
+	want := []map[string]any{
 		{
 			"@level":   "info",
 			"@message": "Outputs: 2",
 			"@module":  "tofu.ui",
 			"type":     "outputs",
-			"outputs": map[string]interface{}{
-				"boop_count": map[string]interface{}{
+			"outputs": map[string]any{
+				"boop_count": map[string]any{
 					"sensitive": false,
 					"value":     float64(92),
 					"type":      "number",
 				},
-				"password": map[string]interface{}{
+				"password": map[string]any{
 					"sensitive": true,
 					"type":      "string",
 				},

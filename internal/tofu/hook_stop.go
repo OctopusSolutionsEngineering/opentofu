@@ -57,7 +57,7 @@ func (h *stopHook) PostProvisionInstanceStep(addr addrs.AbsResourceInstance, typ
 	return h.hook()
 }
 
-func (h *stopHook) ProvisionOutput(addr addrs.AbsResourceInstance, typeName string, line string) {
+func (h *stopHook) ProvisionOutput(addr addrs.AbsResourceInstance, typeName string, line string, configMarks cty.ValueMarks) {
 }
 
 func (h *stopHook) PreRefresh(addr addrs.AbsResourceInstance, gen states.Generation, priorState cty.Value) (HookAction, error) {
@@ -76,7 +76,7 @@ func (h *stopHook) PostImportState(addr addrs.AbsResourceInstance, imported []pr
 	return h.hook()
 }
 
-func (h *stopHook) PrePlanImport(addr addrs.AbsResourceInstance, importID string) (HookAction, error) {
+func (h *stopHook) PrePlanImport(addr addrs.AbsResourceInstance, target providers.ImportTarget) (HookAction, error) {
 	return h.hook()
 }
 

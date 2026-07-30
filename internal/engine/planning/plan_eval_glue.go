@@ -10,12 +10,15 @@ import (
 	"fmt"
 	"iter"
 	"log"
+	"strings"
 
+	"github.com/hashicorp/hcl/v2"
 	"github.com/zclconf/go-cty/cty"
 
 	"github.com/opentofu/opentofu/internal/addrs"
 	"github.com/opentofu/opentofu/internal/collections"
 	"github.com/opentofu/opentofu/internal/lang/eval"
+	"github.com/opentofu/opentofu/internal/plans"
 	"github.com/opentofu/opentofu/internal/providers"
 	"github.com/opentofu/opentofu/internal/states"
 	"github.com/opentofu/opentofu/internal/tfdiags"
@@ -33,11 +36,6 @@ type planGlue struct {
 }
 
 var _ eval.PlanGlue = (*planGlue)(nil)
-
-// I'm not sure that this belongs here
-func (p *planGlue) ValidateProviderConfig(ctx context.Context, provider addrs.Provider, configVal cty.Value) tfdiags.Diagnostics {
-	return p.planCtx.providers.ValidateProviderConfig(ctx, provider, configVal)
-}
 
 // PlanDesiredResourceInstance implements eval.PlanGlue.
 //
@@ -58,7 +56,8 @@ func (p *planGlue) PlanDesiredResourceInstance(ctx context.Context, inst *eval.D
 	case addrs.DataResourceMode:
 		obj, diags = p.planDesiredDataResourceInstance(ctx, inst)
 	case addrs.EphemeralResourceMode:
-		obj, diags = p.planDesiredEphemeralResourceInstance(ctx, inst)
+		// Ephemerals are not part of the resource graph
+		panic("unreachable")
 	default:
 		// We should not get here because the cases above should always be
 		// exhaustive for all of the valid resource modes.
@@ -201,6 +200,8 @@ func (p *planGlue) PlanModuleCallOrphans(ctx context.Context, callerModuleInstAd
 
 // PlanResourceInstanceOrphans implements eval.PlanGlue.
 func (p *planGlue) PlanResourceInstanceOrphans(ctx context.Context, resourceAddr addrs.AbsResource, desiredInstances iter.Seq[addrs.InstanceKey]) tfdiags.Diagnostics {
+	var diags tfdiags.Diagnostics
+
 	if resourceAddr.IsPlaceholder() {
 		// can't predict anything about what might be desired or orphaned
 		// under this resource.
@@ -212,10 +213,65 @@ func (p *planGlue) PlanResourceInstanceOrphans(ctx context.Context, resourceAddr
 		return nil
 	}
 	desiredSet := collections.CollectSet(desiredInstances)
+	replaceNeedsKey := false
 	for key := range desiredSet {
 		if _, ok := key.(addrs.WildcardKey); ok {
 			// can't predict what instances are desired for this resource
 			return nil
+		}
+		if key != addrs.NoKey {
+			replaceNeedsKey = true
+		}
+	}
+
+	// TODO consider porting this logic to the other Orphan paths and extending to match key types.
+	// This only handles one very specific class of errors and should probably be improved at some point.
+	for _, candidateAddr := range p.planCtx.forceReplace {
+		if candidateAddr.Resource.Resource.Equal(resourceAddr.Resource) && candidateAddr.Module.Equal(resourceAddr.Module) {
+			// Matches without instance key
+			if replaceNeedsKey && candidateAddr.Resource.Key == addrs.NoKey {
+				var instanceAddrs []addrs.AbsResourceInstance
+				for desired := range desiredSet {
+					instanceAddrs = append(instanceAddrs, resourceAddr.Instance(desired))
+				}
+				// Copied from nodeExpandPlannableResource.expandResourceInstances
+				switch {
+				case len(instanceAddrs) == 0:
+					// In this case there _are_ no instances to replace, so
+					// there isn't any alternative address for us to suggest.
+					diags = diags.Append(tfdiags.Sourceless(
+						tfdiags.Warning,
+						"Incompletely-matched force-replace resource instance",
+						fmt.Sprintf(
+							"Your force-replace request for %s doesn't match any resource instances because this resource doesn't have any instances.",
+							candidateAddr,
+						),
+					))
+				case len(instanceAddrs) == 1:
+					diags = diags.Append(tfdiags.Sourceless(
+						tfdiags.Warning,
+						"Incompletely-matched force-replace resource instance",
+						fmt.Sprintf(
+							"Your force-replace request for %s doesn't match any resource instances because it lacks an instance key.\n\nTo force replacement of the single declared instance, use the following option instead:\n  -replace=%q",
+							candidateAddr, instanceAddrs[0],
+						),
+					))
+				default:
+					var possibleValidOptions strings.Builder
+					for _, addr := range instanceAddrs {
+						fmt.Fprintf(&possibleValidOptions, "\n  -replace=%q", addr)
+					}
+
+					diags = diags.Append(tfdiags.Sourceless(
+						tfdiags.Warning,
+						"Incompletely-matched force-replace resource instance",
+						fmt.Sprintf(
+							"Your force-replace request for %s doesn't match any resource instances because it lacks an instance key.\n\nTo force replacement of particular instances, use one or more of the following options instead:%s",
+							candidateAddr, possibleValidOptions.String(),
+						),
+					))
+				}
+			}
 		}
 	}
 
@@ -234,7 +290,6 @@ func (p *planGlue) PlanResourceInstanceOrphans(ctx context.Context, resourceAddr
 		}
 		return true
 	})
-	var diags tfdiags.Diagnostics
 	for addr, state := range orphaned {
 		diags = diags.Append(
 			p.planOrphanResourceInstance(ctx, addr, state),
@@ -289,7 +344,7 @@ func (p *planGlue) PlanResourceOrphans(ctx context.Context, moduleInstAddr addrs
 // that the corresponding resource cannot be planned because its associated
 // provider has an invalid configuration.
 func (p *planGlue) providerClient(ctx context.Context, addr addrs.AbsProviderInstanceCorrect) (providers.Configured, tfdiags.Diagnostics) {
-	return p.planCtx.providerInstances.ProviderClient(ctx, addr, p)
+	return p.oracle.ProviderInstance(ctx, addr)
 }
 
 func (p *planGlue) desiredResourceInstanceMustBeDeferred(inst *eval.DesiredResourceInstance) bool {
@@ -344,4 +399,66 @@ func resourceInstancesFilter(state *states.State, want func(addrs.AbsResourceIns
 			}
 		}
 	}
+}
+
+func (p *planGlue) evaluateReplaceTriggeredBy(ref eval.ResourceInstanceAttributePath) (*addrs.AbsResourceInstance, tfdiags.Diagnostics) {
+	var diags tfdiags.Diagnostics
+	var changes []*plans.ResourceInstanceChange
+
+	instance, ok := p.planCtx.resourceInstObjs.Get(ref.ResourceInstance.CurrentObject())
+	if !ok {
+		// This should not happen!
+		diags = diags.Append(&hcl.Diagnostic{
+			Severity: hcl.DiagError,
+			Summary:  `Reference to undeclared resource`,
+			Detail:   fmt.Sprintf(`A resource %s has not been declared`, ref.ResourceInstance),
+		})
+		return nil, diags
+	}
+	currentChange := instance.PlannedChange
+	if currentChange != nil {
+		changes = append(changes, currentChange)
+	}
+
+	if len(changes) == 0 {
+		return nil, diags
+	}
+
+	// If we don't have a traversal beyond the resource, then we can just look
+	// for any change.
+	if len(ref.Path) == 0 {
+		for _, c := range changes {
+			if c.Action.CanTriggerDownstreamReplace() {
+				return &ref.ResourceInstance, diags
+			}
+		}
+
+		// no change triggered
+		return nil, diags
+	}
+
+	// This must be an instances to have a remaining traversal, which means a
+	// single change.
+	change := changes[0]
+
+	// Make sure the change is actionable. A Delete action will have a change
+	// in value, but is not valid for our purposes here.
+	if !change.Action.CanTriggerDownstreamReplace() {
+		return nil, diags
+	}
+
+	attrBefore, _ := ref.Path.Apply(change.Before)
+	attrAfter, _ := ref.Path.Apply(change.After)
+
+	replace := false
+	if attrBefore == cty.NilVal || attrAfter == cty.NilVal {
+		replace = attrBefore != attrAfter
+	} else {
+		replace = !attrBefore.RawEquals(attrAfter)
+	}
+
+	if replace {
+		return &ref.ResourceInstance, diags
+	}
+	return nil, diags
 }

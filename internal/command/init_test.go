@@ -21,6 +21,7 @@ import (
 	"github.com/davecgh/go-spew/spew"
 	"github.com/google/go-cmp/cmp"
 	"github.com/hashicorp/go-version"
+	"github.com/mitchellh/cli"
 	"github.com/opentofu/opentofu/internal/command/arguments"
 	"github.com/opentofu/opentofu/internal/command/flags"
 	"github.com/opentofu/opentofu/internal/command/workdir"
@@ -81,7 +82,7 @@ func TestInit_multipleArgs(t *testing.T) {
 	}
 	code := c.Run(args)
 	output := done(t)
-	if code != 1 {
+	if code != cli.RunResultHelp {
 		t.Fatalf("bad: \n%s", output.Stdout())
 	}
 }
@@ -494,7 +495,7 @@ func TestInit_backendConfigFilePowershellConfusion(t *testing.T) {
 	args := []string{"-backend-config=", "./input.config"}
 	code := c.Run(args)
 	output := done(t)
-	if code != 1 {
+	if code != cli.RunResultHelp {
 		t.Fatalf("got exit status %d; want 1\nstderr:\n%s\n\nstdout:\n%s", code, output.Stderr(), output.Stdout())
 	}
 
@@ -741,7 +742,7 @@ func TestInit_backendConfigKVReInit(t *testing.T) {
 
 	// make sure the backend is configured how we expect
 	configState := testDataStateRead(t, filepath.Join(workdir.DefaultDataDir, arguments.DefaultStateFilename))
-	cfg := map[string]interface{}{}
+	cfg := map[string]any{}
 	if err := json.Unmarshal(configState.Backend.ConfigRaw, &cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -757,7 +758,7 @@ func TestInit_backendConfigKVReInit(t *testing.T) {
 
 	// make sure the backend is configured how we expect
 	configState = testDataStateRead(t, filepath.Join(workdir.DefaultDataDir, arguments.DefaultStateFilename))
-	cfg = map[string]interface{}{}
+	cfg = map[string]any{}
 	if err := json.Unmarshal(configState.Backend.ConfigRaw, &cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -808,7 +809,7 @@ func TestInit_backendConfigKVReInitWithConfigDiff(t *testing.T) {
 
 	// make sure the backend is configured how we expect
 	configState := testDataStateRead(t, filepath.Join(workdir.DefaultDataDir, arguments.DefaultStateFilename))
-	cfg := map[string]interface{}{}
+	cfg := map[string]any{}
 	if err := json.Unmarshal(configState.Backend.ConfigRaw, &cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -856,7 +857,7 @@ func TestInit_backendReinitWithExtra(t *testing.T) {
 	testCopyDir(t, testFixturePath("init-backend-empty"), td)
 	t.Chdir(td)
 
-	m := testMetaBackend(t, nil)
+	m := testMetaBackend(t)
 	opts := &BackendOpts{
 		ConfigOverride: configs.SynthBody("synth", map[string]cty.Value{
 			"path": cty.StringVal("hello"),
@@ -1435,18 +1436,18 @@ func TestInit_getProvider(t *testing.T) {
 
 		// Construct a mock state file from the far future
 		type FutureState struct {
-			Version          uint                     `json:"version"`
-			Lineage          string                   `json:"lineage"`
-			TerraformVersion string                   `json:"terraform_version"`
-			Outputs          map[string]interface{}   `json:"outputs"`
-			Resources        []map[string]interface{} `json:"resources"`
+			Version          uint             `json:"version"`
+			Lineage          string           `json:"lineage"`
+			TerraformVersion string           `json:"terraform_version"`
+			Outputs          map[string]any   `json:"outputs"`
+			Resources        []map[string]any `json:"resources"`
 		}
 		fs := &FutureState{
 			Version:          999,
 			Lineage:          "123-456-789",
 			TerraformVersion: "999.0.0",
-			Outputs:          make(map[string]interface{}),
-			Resources:        make([]map[string]interface{}, 0),
+			Outputs:          make(map[string]any),
+			Resources:        make([]map[string]any, 0),
 		}
 		src, err := json.MarshalIndent(fs, "", "  ")
 		if err != nil {
@@ -2238,7 +2239,7 @@ func TestInit_checkRequiredVersionFirst(t *testing.T) {
 			t.Fatalf("got exit status %d; want 1\nstderr:\n%s\n\nstdout:\n%s", code, output.Stderr(), output.Stdout())
 		}
 		errStr := output.Stderr()
-		if !strings.Contains(errStr, `Unsupported OpenTofu Core version`) {
+		if !strings.Contains(errStr, `This module is not compatible with OpenTofu v`) {
 			t.Fatalf("output should point to unmet version constraint, but is:\n\n%s", errStr)
 		}
 	})
@@ -2262,7 +2263,7 @@ func TestInit_checkRequiredVersionFirst(t *testing.T) {
 			t.Fatalf("got exit status %d; want 1\nstderr:\n%s\n\nstdout:\n%s", code, output.Stderr(), output.Stdout())
 		}
 		errStr := output.Stderr()
-		if !strings.Contains(errStr, `Unsupported OpenTofu Core version`) {
+		if !strings.Contains(errStr, `This module is not compatible with OpenTofu v`) {
 			t.Fatalf("output should point to unmet version constraint, but is:\n\n%s", errStr)
 		}
 	})
@@ -2899,39 +2900,6 @@ func TestInit_invalidSyntaxWithBackend(t *testing.T) {
 	}
 }
 
-func TestInit_invalidSyntaxInvalidBackend(t *testing.T) {
-	td := t.TempDir()
-	testCopyDir(t, testFixturePath("init-syntax-invalid-backend-invalid"), td)
-	t.Chdir(td)
-
-	view, done := testView(t)
-	m := Meta{
-		WorkingDir: workdir.NewDir("."),
-		View:       view,
-	}
-
-	c := &InitCommand{
-		Meta: m,
-	}
-
-	code := c.Run([]string{"-no-color"})
-	output := done(t)
-	if code == 0 {
-		t.Fatalf("succeeded, but was expecting error\nstdout:\n%s\nstderr:\n%s", output.Stdout(), output.Stderr())
-	}
-
-	errStr := output.Stderr()
-	if subStr := "OpenTofu encountered problems during initialization, including problems\nwith the configuration, described below."; !strings.Contains(errStr, subStr) {
-		t.Errorf("Error output should include preamble\nwant substr: %s\ngot:\n%s", subStr, errStr)
-	}
-	if subStr := "Error: Unsupported block type"; !strings.Contains(errStr, subStr) {
-		t.Errorf("Error output should mention syntax errors\nwant substr: %s\ngot:\n%s", subStr, errStr)
-	}
-	if subStr := "Error: Unsupported backend type"; !strings.Contains(errStr, subStr) {
-		t.Errorf("Error output should mention the invalid backend\nwant substr: %s\ngot:\n%s", subStr, errStr)
-	}
-}
-
 func TestInit_invalidSyntaxBackendAttribute(t *testing.T) {
 	td := t.TempDir()
 	testCopyDir(t, testFixturePath("init-syntax-invalid-backend-attribute-invalid"), td)
@@ -3290,6 +3258,43 @@ func TestInit_skipEncryptionBackendFalse(t *testing.T) {
 			t.Fatalf("init should not run successfully\n")
 		} else if !strings.Contains(output.Stderr(), "key_provider.aws_kms.key failed with error:") {
 			t.Fatalf("generated error should contain the string \"Error: Unable to fetch encryption key data\"\ninstead got : %s\n", output.Stderr())
+		}
+	})
+}
+
+func TestInit_backendFalse_skipsBackendFromStateOnPreviouslyInitializedDir(t *testing.T) {
+	t.Run("init succeeds with -backend=false even when an encrypted state file is already present", func(t *testing.T) {
+		td := t.TempDir()
+		testCopyDir(t, testFixturePath("init-encryption-with-state"), td)
+		t.Chdir(td)
+
+		overrides := metaOverridesForProvider(testProvider())
+		view, done := testView(t)
+		providerSource, closeCallback := newMockProviderSource(t, map[string][]string{
+			"hashicorp/aws": {"5.0", "5.8"},
+		})
+		defer closeCallback()
+		m := Meta{
+			WorkingDir:       workdir.NewDir("."),
+			testingOverrides: overrides,
+			View:             view,
+			ProviderSource:   providerSource,
+		}
+
+		c := &InitCommand{
+			Meta: m,
+		}
+
+		args := []string{
+			"-backend=false",
+		}
+		code := c.Run(args)
+		output := done(t)
+		if code != 0 {
+			t.Fatalf("init should run successfully with -backend=false even with an encrypted state file present\nexit code: %d\nstderr:\n%s\nstdout:\n%s", code, output.Stderr(), output.Stdout())
+		}
+		if stderr := output.Stderr(); stderr != "" {
+			t.Errorf("expected to have no errors but got:\n%s", stderr)
 		}
 	})
 }

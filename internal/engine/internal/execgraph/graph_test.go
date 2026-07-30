@@ -68,36 +68,23 @@ func TestGraphMarshalUnmarshalValid(t *testing.T) {
 					Name: "example",
 				}.Absolute(addrs.RootModuleInstance).Instance(addrs.NoKey)
 				instAddrResult := builder.ConstantResourceInstAddr(instAddr)
-				desiredInst := builder.ResourceInstanceDesired(instAddrResult, nil)
 				priorState := builder.ResourceInstancePrior(instAddrResult)
+				meta := builder.ResourceInstanceCurrentMeta(instAddrResult, priorState)
+				desiredInst := builder.ResourceInstanceDesired(meta)
 				plannedVal := builder.ConstantValue(cty.ObjectVal(map[string]cty.Value{
 					"name": cty.StringVal("thingy"),
 				}))
-				providerInstAddrRef := builder.ConstantProviderInstAddr(addrs.AbsProviderInstanceCorrect{
-					Config: addrs.AbsProviderConfigCorrect{
-						Config: addrs.ProviderConfigCorrect{
-							Provider: addrs.NewBuiltInProvider("test"),
-						},
-					},
-				})
-				providerInstConfig := builder.ProviderInstanceConfig(providerInstAddrRef, nil)
-				providerClient := builder.ProviderInstanceOpen(providerInstConfig)
-				providerCloseDeps, registerUser := builder.MutableWaiter()
-				_ = builder.ProviderInstanceClose(providerClient, providerCloseDeps)
-
 				finalPlan := builder.ManagedFinalPlan(
+					meta,
 					desiredInst,
 					priorState,
 					plannedVal,
-					providerClient,
 				)
 				newState := builder.ManagedApply(
 					finalPlan,
 					NilResultRef[*exec.ResourceInstanceObject](),
-					providerClient,
 					builder.Waiter(),
 				)
-				registerUser(newState)
 				builder.SetResourceInstanceFinalStateResult(instAddr, newState)
 				return builder.Finish()
 			},
@@ -106,15 +93,13 @@ func TestGraphMarshalUnmarshalValid(t *testing.T) {
 					"name": cty.StringVal("thingy"),
 				});
 
-				r[0] = ResourceInstanceDesired(test.example, await());
-				r[1] = ResourceInstancePrior(test.example);
-				r[2] = ProviderInstanceConfig(provider["terraform.io/builtin/test"], await());
-				r[3] = ProviderInstanceOpen(r[2]);
-				r[4] = ManagedFinalPlan(r[0], r[1], v[0], r[3]);
-				r[5] = ManagedApply(r[4], nil, r[3], await());
-				r[6] = ProviderInstanceClose(r[3], await(r[5]));
+				r[0] = ResourceInstancePrior(test.example);
+				r[1] = ResourceInstanceCurrentMeta(test.example, r[0]);
+				r[2] = ResourceInstanceDesired(r[1]);
+				r[3] = ManagedFinalPlan(r[1], r[2], r[0], v[0]);
+				r[4] = ManagedApply(r[3], nil, await());
 
-				test.example = r[5];
+				test.example = r[4];
 			`,
 		},
 		"data resource instance read": {
@@ -127,36 +112,22 @@ func TestGraphMarshalUnmarshalValid(t *testing.T) {
 					Name: "example",
 				}.Absolute(addrs.RootModuleInstance).Instance(addrs.NoKey)
 				instAddrResult := builder.ConstantResourceInstAddr(instAddr)
-				desiredInst := builder.ResourceInstanceDesired(instAddrResult, nil)
-
-				providerInstAddrRef := builder.ConstantProviderInstAddr(addrs.AbsProviderInstanceCorrect{
-					Config: addrs.AbsProviderConfigCorrect{
-						Config: addrs.ProviderConfigCorrect{
-							Provider: addrs.NewBuiltInProvider("test"),
-						},
-					},
-				})
-				providerInstConfig := builder.ProviderInstanceConfig(providerInstAddrRef, nil)
-				providerClient := builder.ProviderInstanceOpen(providerInstConfig)
-				providerCloseDeps, registerUser := builder.MutableWaiter()
-				_ = builder.ProviderInstanceClose(providerClient, providerCloseDeps)
+				meta := builder.ResourceInstanceCurrentMeta(instAddrResult, nil)
+				desiredInst := builder.ResourceInstanceDesired(meta)
 
 				plannedVal := builder.ConstantValue(cty.DynamicVal)
-				newState := builder.DataRead(desiredInst, plannedVal, providerClient)
-				registerUser(newState)
+				newState := builder.DataRead(meta, desiredInst, plannedVal, nil)
 				builder.SetResourceInstanceFinalStateResult(instAddr, newState)
 				return builder.Finish()
 			},
 			`
 				v[0] = cty.UnknownVal(cty.DynamicPseudoType);
 
-				r[0] = ResourceInstanceDesired(data.test.example, await());
-				r[1] = ProviderInstanceConfig(provider["terraform.io/builtin/test"], await());
-				r[2] = ProviderInstanceOpen(r[1]);
-				r[3] = DataRead(r[0], v[0], r[2]);
-				r[4] = ProviderInstanceClose(r[2], await(r[3]));
+				r[0] = ResourceInstanceCurrentMeta(data.test.example, nil);
+				r[1] = ResourceInstanceDesired(r[0]);
+				r[2] = DataRead(r[0], r[1], v[0], await());
 
-				data.test.example = r[3];
+				data.test.example = r[2];
 			`,
 		},
 		"data resource instance reads with dependency": {
@@ -172,25 +143,13 @@ func TestGraphMarshalUnmarshalValid(t *testing.T) {
 					Name: "example2",
 				}.Absolute(addrs.RootModuleInstance).Instance(addrs.NoKey)
 
-				providerInstAddrRef := builder.ConstantProviderInstAddr(addrs.AbsProviderInstanceCorrect{
-					Config: addrs.AbsProviderConfigCorrect{
-						Config: addrs.ProviderConfigCorrect{
-							Provider: addrs.NewBuiltInProvider("test"),
-						},
-					},
-				})
-				providerInstConfig := builder.ProviderInstanceConfig(providerInstAddrRef, nil)
-				providerClient := builder.ProviderInstanceOpen(providerInstConfig)
-				providerCloseDeps, registerUser := builder.MutableWaiter()
-				_ = builder.ProviderInstanceClose(providerClient, providerCloseDeps)
-
 				plannedVal := builder.ConstantValue(cty.DynamicVal)
-				desiredInst1 := builder.ResourceInstanceDesired(builder.ConstantResourceInstAddr(instAddr1), nil)
-				newState1 := builder.DataRead(desiredInst1, plannedVal, providerClient)
-				desiredInst2 := builder.ResourceInstanceDesired(builder.ConstantResourceInstAddr(instAddr2), builder.Waiter(newState1))
-				newState2 := builder.DataRead(desiredInst2, plannedVal, providerClient)
-				registerUser(newState1)
-				registerUser(newState2)
+				meta1 := builder.ResourceInstanceCurrentMeta(builder.ConstantResourceInstAddr(instAddr1), nil)
+				desiredInst1 := builder.ResourceInstanceDesired(meta1)
+				newState1 := builder.DataRead(meta1, desiredInst1, plannedVal, nil)
+				meta2 := builder.ResourceInstanceCurrentMeta(builder.ConstantResourceInstAddr(instAddr2), nil)
+				desiredInst2 := builder.ResourceInstanceDesired(meta2)
+				newState2 := builder.DataRead(meta2, desiredInst2, plannedVal, builder.Waiter(newState1))
 				builder.SetResourceInstanceFinalStateResult(instAddr1, newState1)
 				builder.SetResourceInstanceFinalStateResult(instAddr2, newState2)
 				return builder.Finish()
@@ -198,15 +157,14 @@ func TestGraphMarshalUnmarshalValid(t *testing.T) {
 			`
 				v[0] = cty.UnknownVal(cty.DynamicPseudoType);
 
-				r[0] = ProviderInstanceConfig(provider["terraform.io/builtin/test"], await());
-				r[1] = ProviderInstanceOpen(r[0]);
-				r[2] = ResourceInstanceDesired(data.test.example1, await());
-				r[3] = DataRead(r[2], v[0], r[1]);
-				r[4] = ResourceInstanceDesired(data.test.example2, await(r[3]));
-				r[5] = DataRead(r[4], v[0], r[1]);
-				r[6] = ProviderInstanceClose(r[1], await(r[3], r[5]));
+				r[0] = ResourceInstanceCurrentMeta(data.test.example1, nil);
+				r[1] = ResourceInstanceDesired(r[0]);
+				r[2] = DataRead(r[0], r[1], v[0], await());
+				r[3] = ResourceInstanceCurrentMeta(data.test.example2, nil);
+				r[4] = ResourceInstanceDesired(r[3]);
+				r[5] = DataRead(r[3], r[4], v[0], await(r[2]));
 
-				data.test.example1 = r[3];
+				data.test.example1 = r[2];
 				data.test.example2 = r[5];
 			`,
 		},

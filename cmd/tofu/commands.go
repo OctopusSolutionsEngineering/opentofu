@@ -13,6 +13,7 @@ import (
 	"github.com/hashicorp/go-plugin"
 	"github.com/hashicorp/go-retryablehttp"
 	"github.com/mitchellh/cli"
+	"github.com/opentofu/opentofu/internal/command/system"
 	"github.com/opentofu/opentofu/internal/command/workdir"
 	"github.com/opentofu/svchost"
 	"github.com/opentofu/svchost/disco"
@@ -25,7 +26,6 @@ import (
 	"github.com/opentofu/opentofu/internal/getmodules"
 	"github.com/opentofu/opentofu/internal/getproviders"
 	pluginDiscovery "github.com/opentofu/opentofu/internal/plugin/discovery"
-	"github.com/opentofu/opentofu/internal/terminal"
 )
 
 // runningInAutomationEnvName gives the name of an environment variable that
@@ -53,13 +53,10 @@ var primaryCommands []string
 // hiddenCommands set, because that would be rather silly.
 var hiddenCommands map[string]struct{}
 
-// Ui is the cli.Ui used for communicating to the outside world.
-var Ui cli.Ui
-
 func initCommands(
 	ctx context.Context,
 	wd *workdir.Dir,
-	streams *terminal.Streams,
+	view *views.View,
 	config *cliconfig.Config,
 	services *disco.Disco,
 	modulePkgFetcher *getmodules.PackageFetcher,
@@ -89,19 +86,18 @@ func initCommands(
 
 	meta := command.Meta{
 		WorkingDir: wd,
-		Streams:    streams,
-		View:       views.NewView(streams).SetRunningInAutomation(inAutomation),
-
-		Color:            true,
-		GlobalPluginDirs: globalPluginDirs(),
-		Ui:               Ui,
+		View:       view.SetRunningInAutomation(inAutomation),
+		SystemCfg: system.Config{
+			RunningInAutomation:       inAutomation,
+			CLIConfigDir:              configDir,
+			PluginCacheDir:            config.PluginCacheDir,
+			GlobalPluginDirs:          globalPluginDirs(),
+			AllowExperimentalFeatures: experimentsAreAllowed(),
+			E2ETestingFeaturesEnabled: e2eTestingFeaturesEnabled(),
+		},
 
 		Services:        services,
 		BrowserLauncher: browserLauncher(),
-
-		RunningInAutomation: inAutomation,
-		CLIConfigDir:        configDir,
-		PluginCacheDir:      config.PluginCacheDir,
 
 		PluginCacheMayBreakDependencyLockFile: config.PluginCacheMayBreakDependencyLockFile,
 
@@ -119,7 +115,9 @@ func initCommands(
 		ProviderDevOverrides: providerDevOverrides,
 		UnmanagedProviders:   unmanagedProviders,
 
-		AllowExperimentalFeatures: experimentsAreAllowed(),
+		// OCICredentialsPolicyBuilder is passed here for some commands (e.g. providers lock) that cannot
+		// use ProvidersSource but still might need OCICredentials provided by the config
+		OCICredentialsPolicyBuilder: config.OCICredentialsPolicy,
 
 		// ProviderSourceLocationConfig is used for some commands that do not make
 		// use of the OpenTofu configuration files. Therefore, there is no way to configure

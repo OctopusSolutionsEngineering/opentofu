@@ -22,10 +22,8 @@ func TestRefreshHuman_operation(t *testing.T) {
 	streams, done := terminal.StreamsForTesting(t)
 	defer done(t)
 	v := NewRefresh(arguments.ViewOptions{ViewType: arguments.ViewHuman}, NewView(streams).SetRunningInAutomation(true)).Operation()
-	if hv, ok := v.(*OperationHuman); !ok {
+	if _, ok := v.(*OperationHuman); !ok {
 		t.Fatalf("unexpected return type %t", v)
-	} else if hv.inAutomation != true {
-		t.Fatalf("unexpected inAutomation value on Operation view")
 	}
 }
 
@@ -89,19 +87,19 @@ func TestRefreshJSON_outputs(t *testing.T) {
 		"password":   {Value: cty.StringVal("horse-battery").Mark(marks.Sensitive), Sensitive: true},
 	})
 
-	want := []map[string]interface{}{
+	want := []map[string]any{
 		{
 			"@level":   "info",
 			"@message": "Outputs: 2",
 			"@module":  "tofu.ui",
 			"type":     "outputs",
-			"outputs": map[string]interface{}{
-				"boop_count": map[string]interface{}{
+			"outputs": map[string]any{
+				"boop_count": map[string]any{
 					"sensitive": false,
 					"value":     float64(92),
 					"type":      "number",
 				},
-				"password": map[string]interface{}{
+				"password": map[string]any{
 					"sensitive": true,
 					"type":      "string",
 				},

@@ -7,7 +7,6 @@ package planfile
 
 import (
 	"bytes"
-	"slices"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -16,9 +15,11 @@ import (
 
 	"github.com/opentofu/opentofu/internal/addrs"
 	"github.com/opentofu/opentofu/internal/checks"
+	"github.com/opentofu/opentofu/internal/configs/configschema"
 	"github.com/opentofu/opentofu/internal/lang/globalref"
 	"github.com/opentofu/opentofu/internal/lang/marks"
 	"github.com/opentofu/opentofu/internal/plans"
+	"github.com/opentofu/opentofu/internal/providers"
 	"github.com/opentofu/opentofu/internal/states"
 )
 
@@ -155,6 +156,31 @@ func TestTFPlanRoundTrip(t *testing.T) {
 					Addr: addrs.Resource{
 						Mode: addrs.ManagedResourceMode,
 						Type: "test_thing",
+						Name: "forget_then_create",
+					}.Instance(addrs.IntKey(0)).Absolute(addrs.RootModuleInstance),
+					PrevRunAddr: addrs.Resource{
+						Mode: addrs.ManagedResourceMode,
+						Type: "test_thing",
+						Name: "forget_then_create",
+					}.Instance(addrs.IntKey(0)).Absolute(addrs.RootModuleInstance),
+					ProviderAddr: addrs.AbsProviderConfig{
+						Provider: addrs.NewDefaultProvider("test"),
+						Module:   addrs.RootModule,
+					},
+					ChangeSrc: plans.ChangeSrc{
+						Action: plans.ForgetThenCreate,
+						Before: mustNewDynamicValue(cty.ObjectVal(map[string]cty.Value{
+							"id": cty.StringVal("old-id"),
+						}), objTy),
+						After: mustNewDynamicValue(cty.ObjectVal(map[string]cty.Value{
+							"id": cty.StringVal("new-id"),
+						}), objTy),
+					},
+				},
+				{
+					Addr: addrs.Resource{
+						Mode: addrs.ManagedResourceMode,
+						Type: "test_thing",
 						Name: "importing",
 					}.Instance(addrs.IntKey(1)).Absolute(addrs.RootModuleInstance),
 					PrevRunAddr: addrs.Resource{
@@ -176,32 +202,6 @@ func TestTFPlanRoundTrip(t *testing.T) {
 						}), objTy),
 						Importing:       &plans.ImportingSrc{ID: "testing"},
 						GeneratedConfig: "resource \\\"test_thing\\\" \\\"importing\\\" {}",
-					},
-				},
-				{
-					Addr: addrs.Resource{
-						Mode: addrs.EphemeralResourceMode,
-						Type: "test_thing",
-						Name: "testeph",
-					}.Instance(addrs.IntKey(1)).Absolute(addrs.RootModuleInstance),
-					PrevRunAddr: addrs.Resource{
-						Mode: addrs.ManagedResourceMode,
-						Type: "test_thing",
-						Name: "testeph",
-					}.Instance(addrs.IntKey(1)).Absolute(addrs.RootModuleInstance),
-					ProviderAddr: addrs.AbsProviderConfig{
-						Provider: addrs.NewDefaultProvider("test"),
-						Module:   addrs.RootModule,
-					},
-					ChangeSrc: plans.ChangeSrc{
-						Action: plans.Open,
-						Before: mustNewDynamicValue(cty.ObjectVal(map[string]cty.Value{
-							"id": cty.StringVal("testing"),
-						}), objTy),
-						After: mustNewDynamicValue(cty.ObjectVal(map[string]cty.Value{
-							"id": cty.StringVal("testing"),
-						}), objTy),
-						GeneratedConfig: "ephemeral \\\"test_thing\\\" \\\"testeph\\\" {}",
 					},
 				},
 			},
@@ -328,16 +328,10 @@ func TestTFPlanRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	{
-		// nullify the ephemeral values from the initial plan since those must be nil in the plan file
-		i := slices.IndexFunc(plan.Changes.Resources, func(src *plans.ResourceInstanceChangeSrc) bool {
-			return src.Addr.Resource.Resource.Mode == addrs.EphemeralResourceMode
-		})
-		plan.Changes.Resources[i].After = nil
-		plan.Changes.Resources[i].Before = nil
-		// delete the variables that are meant to be written only with the name but loaded only in the plan.EphemeralVariables
-		delete(plan.VariableValues, "baz")
-	}
+
+	// While writing the plan, "baz" is also in the plan.EphemeralVariables, which means that will be written
+	// with null in the plan file "variables" object and when read, will be visible only in the plan.EphemeralVariables
+	delete(plan.VariableValues, "baz")
 
 	newPlan, err := readTfplan(&buf)
 	if err != nil {
@@ -452,8 +446,15 @@ func TestTFPlanRoundTripDestroy(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	objSchema := &providers.Schema{
+		Block: &configschema.Block{
+			Attributes: map[string]*configschema.Attribute{
+				"id": {Type: cty.String, Optional: true},
+			},
+		},
+	}
 	for _, rics := range newPlan.Changes.Resources {
-		ric, err := rics.Decode(objTy)
+		ric, err := rics.Decode(objSchema)
 		if err != nil {
 			t.Fatal(err)
 		}

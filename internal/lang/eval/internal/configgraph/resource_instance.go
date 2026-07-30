@@ -13,10 +13,12 @@ import (
 	"github.com/apparentlymart/go-workgraph/workgraph"
 	"github.com/hashicorp/hcl/v2"
 	"github.com/zclconf/go-cty/cty"
+	"github.com/zclconf/go-cty/cty/convert"
 
 	"github.com/opentofu/opentofu/internal/addrs"
 	"github.com/opentofu/opentofu/internal/lang/exprs"
 	"github.com/opentofu/opentofu/internal/lang/grapheval"
+	"github.com/opentofu/opentofu/internal/lang/marks"
 	"github.com/opentofu/opentofu/internal/tfdiags"
 )
 
@@ -49,6 +51,54 @@ type ResourceInstance struct {
 	// or else type mismatch errors will be reported during evaluation.
 	ProviderInstanceValuer *OnceValuer
 
+	// CreateProvisioners are the provisioners to run if the resource instance
+	// is being created. These are distinct from Destroy provisioners, which
+	// are handled in a different code path.
+	CreateProvisioners []Provisioner
+
+	// CreateBeforeDestroyValuer is a valuer that returns the module author's
+	// direction about what "replace" order is required for this resource
+	// instance.
+	//
+	// The valuer must return something that can be converted to [cty.Bool].
+	CreateBeforeDestroyValuer *OnceValuer
+
+	// IgnoreChangesPaths are paths for which the module author requested
+	// that we "ignore changes".
+	//
+	// To "ignore changes" means to disregard what is configured for anything
+	// under a matching path in ConfigVal and to instead treat the corresponding
+	// value from the prior state as the effective desired state. This is
+	// meaningful only when planning in-place updates to an object that is
+	// already tracked in the prior state; it should be ignored when planning
+	// to create or delete the object associated with a resource instance.
+	//
+	// Index steps within the path can potentially have unknown keys if the
+	// decision about what to ignore is based on a value that won't be known
+	// until the apply phase.
+	//
+	// This is meaningful only for resource modes that support the "update"
+	// change action, and so is always empty for other modes.
+	IgnoreChangesPaths []cty.Path
+
+	// ReplaceTriggeredBy describes zero ore more attribute prefixes within
+	// other resource instances for which the planning engine should force
+	// replacement of this resource instance if any value beneath one of
+	// the nominated paths has a change already planned for the current
+	// plan/apply round.
+	//
+	// Index steps within the paths and instance keys within the resource
+	// instance addresses can both potentially have unknown keys if the
+	// decision about what to refer to is based on a value that won't be known
+	// until the apply phase.
+	//
+	// This is meaningful only for resource modes that support the "update"
+	// change action, and so is always false for other modes.
+	//
+	// Any resource instance mentioned in this collection will always also
+	// appear in RequiredResourceInstances.
+	ReplaceTriggeredBy []ResourceInstanceAttributePath
+
 	// Glue is provided by the system that "compiled" this [ResourceInstance]
 	// object to allow calling back into that system to ask further questions
 	// that arise dynamically during evaluation but whose results vary based
@@ -61,6 +111,13 @@ type ResourceInstance struct {
 	// implementation, which might involve side-effects that could produce
 	// different results
 	valueOnce grapheval.Once[cty.Value]
+}
+
+// ResourceInstanceAttributePath describes a (possibly empty) attribute path
+// within a resource instance.
+type ResourceInstanceAttributePath struct {
+	ResourceInstance addrs.AbsResourceInstance
+	Path             cty.Path
 }
 
 var _ exprs.Valuer = (*ResourceInstance)(nil)
@@ -97,11 +154,73 @@ func (ri *ResourceInstance) ConfigValue(ctx context.Context) (v cty.Value, diags
 		// If we don't have a valid config value then we'll stop early
 		// with an unknown value placeholder so that the external process
 		// responsible for providing the result value can assume that it
-		// will only ever recieve validated configuration values.
+		// will only ever receive validated configuration values.
 		return exprs.AsEvalError(cty.DynamicVal), diags
 	}
 
 	return configVal, diags
+}
+
+// CreateBeforeDestroy returns a value-based representation of the "create
+// before destroy" setting for this resource instance.
+//
+// The result is guaranteed to be a [cty.Bool] value, but it could potentially
+// be unknown or marked and it's the caller's responsibility to handle those
+// situations.
+//
+// The different possible known boolean results have the following meaning:
+//   - [cty.True] means that this resource instance MUST use the create-then-destroy replace order.
+//   - [cty.False] means that this resource instance MUST use the destroy-then-create replace order.
+//   - A null value means that either order is acceptable for this resource instance.
+//
+// (Callers of this function may impose additional constraints on its result
+// depending on the context where the resource instance is being used. This
+// function only checks the basic validity rules.)
+func (ri *ResourceInstance) CreateBeforeDestroy(ctx context.Context) (cty.Value, *tfdiags.SourceRange, tfdiags.Diagnostics) {
+	if ri.CreateBeforeDestroyValuer == nil {
+		// Not setting this is equivalent to setting it to null.
+		return cty.NullVal(cty.Bool), nil, nil
+	}
+	rng := ri.CreateBeforeDestroyValuer.ValueSourceRange()
+
+	cbdVal, diags := ri.CreateBeforeDestroyValuer.Value(ctx)
+	const errSummary = "Invalid create_before_destroy argument"
+	if cbdVal == cty.NilVal {
+		if !diags.HasErrors() {
+			panic("CreateBeforeDestroyValuer returned cty.NilVal without errors")
+		}
+		cbdVal = exprs.AsEvalError(cty.DynamicVal) // just so the rest of this can run without crashing
+	}
+	cbdVal, err := convert.Convert(cbdVal, cty.Bool)
+	if err != nil {
+		diags = diags.Append(&hcl.Diagnostic{
+			Severity: hcl.DiagError,
+			Summary:  errSummary,
+			Detail:   fmt.Sprintf("Unsuitable value for create_before_destory argument: %s.", tfdiags.FormatError(err)),
+			Subject:  rng.ToHCL().Ptr(),
+		})
+		cbdVal = cty.UnknownVal(cty.Bool)
+	}
+	if cbdVal.HasMark(marks.Sensitive) {
+		diags = diags.Append(&hcl.Diagnostic{
+			Severity: hcl.DiagError,
+			Summary:  errSummary,
+			Detail:   "The create_before_destroy value must not be derived from a sensitive value, because otherwise OpenTofu's proposed changes could imply the sensitive value.\n\nIf you're certain that this result cannot disclose sensitive information, consider using the \"nonsensitive\" function to explicitly allow it.",
+			Subject:  rng.ToHCL().Ptr(),
+		})
+	}
+	if cbdVal.HasMark(marks.Ephemeral) {
+		diags = diags.Append(&hcl.Diagnostic{
+			Severity: hcl.DiagError,
+			Summary:  errSummary,
+			Detail:   "The create_before_destroy value must not be derived from an ephemeral value, because the ordering decision must be consistent between the plan and apply phases.",
+			Subject:  rng.ToHCL().Ptr(),
+		})
+	}
+	if diags.HasErrors() {
+		cbdVal = exprs.AsEvalError(cbdVal)
+	}
+	return cbdVal, rng, diags
 }
 
 // Value implements exprs.Valuer.
@@ -112,7 +231,7 @@ func (ri *ResourceInstance) Value(ctx context.Context) (v cty.Value, diags tfdia
 			return exprs.AsEvalError(cty.DynamicVal), diags
 		}
 
-		providerInst, providerInstMarks, moreDiags := ri.ProviderInstance(ctx)
+		providerInst, moreDiags := ri.ProviderInstance(ctx)
 		diags = diags.Append(moreDiags)
 		if moreDiags.HasErrors() {
 			return exprs.AsEvalError(cty.DynamicVal), diags
@@ -135,6 +254,8 @@ func (ri *ResourceInstance) Value(ctx context.Context) (v cty.Value, diags tfdia
 		// We must pass the marks from the provider instance selection into the
 		// result because the values that were returned may vary depending on
 		// the provider configuration.
+		_, providerInstMarks := providerInst.Unmark()
+		RemoveNonDependencyMarks(providerInstMarks)
 		resultVal = resultVal.WithMarks(providerInstMarks)
 
 		// TODO: Postconditions, and transfer [ResourceInstanceMark] marks from
@@ -148,23 +269,22 @@ func (ri *ResourceInstance) Value(ctx context.Context) (v cty.Value, diags tfdia
 	})
 }
 
-func (ri *ResourceInstance) ProviderInstance(ctx context.Context) (Maybe[*ProviderInstance], cty.ValueMarks, tfdiags.Diagnostics) {
+func (ri *ResourceInstance) ProviderInstance(ctx context.Context) (exprs.FromValue[*ProviderInstance], tfdiags.Diagnostics) {
 	v, diags := ri.ProviderInstanceValuer.Value(ctx)
 	if diags.HasErrors() {
-		return nil, cty.NewValueMarks(exprs.EvalError), diags
+		return exprs.Unknown[*ProviderInstance]().Mark(exprs.EvalError), diags
 	}
-	inst, marks, err := ProviderInstanceFromValue(v, ri.Provider)
+	inst, err := ProviderInstanceFromValue(v, ri.Provider)
 	if err != nil {
-		marks[exprs.EvalError] = struct{}{}
 		diags = diags.Append(&hcl.Diagnostic{
 			Severity: hcl.DiagError,
 			Summary:  "Invalid provider instance reference",
 			Detail:   fmt.Sprintf("Unsuitable provider selection for %s: %s.", ri.Addr, tfdiags.FormatError(err)),
 			Subject:  MaybeHCLSourceRange(ri.ProviderInstanceValuer.ValueSourceRange()),
 		})
-		return nil, marks, diags
+		return inst.Mark(exprs.EvalError), diags
 	}
-	return inst, marks, diags
+	return inst, diags
 }
 
 // ResourceInstanceDependencies returns a sequence of any other resource
@@ -191,7 +311,7 @@ func (ri *ResourceInstance) ResourceInstanceDependencies(ctx context.Context) it
 	// We ignore diagnostics here because callers should always perform a
 	// CheckAll tree walk, including a visit to this resource instance object,
 	// before trusting anything else that any configgraph nodes report.
-	resultVal := diagsHandledElsewhere(ri.Value(ctx))
+	resultVal := diagsHandledElsewhere(ri.ConfigValue(ctx))
 
 	// Our Value method always marks its result as depending on this
 	// resource instance so that any expressions that refer to it will
@@ -218,6 +338,9 @@ func (ri *ResourceInstance) ValueSourceRange() *tfdiags.SourceRange {
 func (ri *ResourceInstance) CheckAll(ctx context.Context) tfdiags.Diagnostics {
 	var cg CheckGroup
 	cg.CheckValuer(ctx, ri)
+	if ri.CreateBeforeDestroyValuer != nil {
+		cg.CheckValuer(ctx, ri.CreateBeforeDestroyValuer)
+	}
 	return cg.Complete(ctx)
 }
 
@@ -226,6 +349,12 @@ func (ri *ResourceInstance) AnnounceAllGraphevalRequests(announce func(workgraph
 		Name:        fmt.Sprintf("configuration for %s", ri.Addr),
 		SourceRange: ri.ConfigValuer.ValueSourceRange(),
 	})
+	if ri.CreateBeforeDestroyValuer != nil {
+		announce(ri.CreateBeforeDestroyValuer.RequestID(), grapheval.RequestInfo{
+			Name:        fmt.Sprintf("create_before_destroy argument for %s", ri.Addr),
+			SourceRange: ri.CreateBeforeDestroyValuer.ValueSourceRange(),
+		})
+	}
 	announce(ri.valueOnce.RequestID(), grapheval.RequestInfo{
 		Name:        fmt.Sprintf("final value for %s", ri.Addr),
 		SourceRange: ri.ConfigValuer.ValueSourceRange(),

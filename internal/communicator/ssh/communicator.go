@@ -466,7 +466,7 @@ func (c *Communicator) UploadScript(path string, input io.Reader) error {
 	if c.connInfo.TargetPlatform != TargetPlatformWindows {
 		var stdout, stderr bytes.Buffer
 		cmd := &remote.Cmd{
-			Command: fmt.Sprintf("chmod 0777 %s", path),
+			Command: shquot.POSIXShell([]string{"chmod", "0777", path}),
 			Stdout:  &stdout,
 			Stderr:  &stderr,
 		}
@@ -896,7 +896,8 @@ func quoteShell(args []string, targetPlatform string) (string, error) {
 		return shquot.POSIXShell(args), nil
 	}
 	if targetPlatform == TargetPlatformWindows {
-		return shquot.WindowsArgv(args), nil
+		cmd, cmdArgs := shquot.WindowsArgvSplit(args)
+		return fmt.Sprintf("%s %s", cmd, cmdArgs), nil
 	}
 
 	return "", fmt.Errorf("Cannot quote shell command, target platform unknown: %s", targetPlatform)

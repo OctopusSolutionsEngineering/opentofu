@@ -12,6 +12,7 @@ import (
 	"github.com/apparentlymart/go-workgraph/workgraph"
 
 	"github.com/opentofu/opentofu/internal/addrs"
+	"github.com/opentofu/opentofu/internal/getproviders"
 	"github.com/opentofu/opentofu/internal/lang/eval/internal/configgraph"
 	"github.com/opentofu/opentofu/internal/lang/exprs"
 	"github.com/opentofu/opentofu/internal/lang/grapheval"
@@ -73,6 +74,41 @@ type CompiledModuleInstance interface {
 	// panics or other misbehavior.
 	ResultValuer(ctx context.Context) exprs.Valuer
 
+	// ResourceInstanceObjectMeta returns whatever metadata applies to the
+	// given resource instance object based only on information available in
+	// the configuration.
+	//
+	// Calling this function is likely to force parts of the configuration to
+	// be evaluated, but no diagnostics are returned since callers are expected
+	// to also use [CompiledModuleInstance.CheckAll] to collect the diagnostics
+	// from all parts of the module instance content at once. If errors in
+	// the configuration prevent producing the full metadata for the resource
+	// instance then the result may include unknown values as placeholders for
+	// the erroneous configuration values.
+	//
+	// It's up to the implementer of this method to decide what exactly it
+	// means for some metadata to be associated with a specific resource
+	// instance object. In practice the metadata could actually be defined
+	// on a per-resource or per-resource-instance basis instead, but that
+	// decision is an implementation detail of the specific language
+	// implementation so that it can potentially vary between language editions.
+	//
+	// This method never returns a nil result. If the configuration contains no
+	// metadata at all for the requested object then the implementer is expected
+	// to return some reasonable default settings to use as a baseline.
+	//
+	// DO NOT MODIFY ANYTHING REACHABLE THROUGH THE RETURNED POINTER! A resource
+	// instance metadata object is treated as immutable by convention.
+	//
+	// Note that from the perspective of the planning and applying engines the
+	// full metadata for a resource instance object is defined as a melding of
+	// this result along with information taken from the prior state, and so
+	// unless you're implementing the code responsible for merging those two
+	// sources of metadata you probably shouldn't be using the result of this
+	// method directly. Use higher-level wrappers in the planning and applying
+	// engines instead.
+	ResourceInstanceObjectMeta(ctx context.Context, addr addrs.ResourceInstanceObject) *ConfiguredResourceInstanceObjectMeta
+
 	// ChildModuleCalls returns a sequence of addresses of all of the module
 	// calls that are declared in this module instance.
 	//
@@ -122,6 +158,8 @@ type CompiledModuleInstance interface {
 	// dynamically-decided resource instances for each resource.
 	Resources(ctx context.Context) iter.Seq[addrs.Resource]
 
+	Resource(ctx context.Context, addr addrs.Resource) *configgraph.Resource
+
 	// ResourceInstances returns a sequence of all of the resource instances
 	// declared in the module.
 	//
@@ -163,6 +201,8 @@ type CompiledModuleInstance interface {
 	// This blocks on the decision about which instances are available for the
 	// relevant provider config.
 	ProviderInstance(ctx context.Context, addr addrs.ProviderInstanceCorrect) *configgraph.ProviderInstance
+
+	ProviderRequirements(ctx context.Context) (getproviders.Requirements, *getproviders.ProvidersQualification, tfdiags.Diagnostics)
 
 	// AnnounceAllGraphevalRequests calls announce for each [grapheval.Once],
 	// [OnceValuer], or other [workgraph.RequestID] anywhere in the tree under this

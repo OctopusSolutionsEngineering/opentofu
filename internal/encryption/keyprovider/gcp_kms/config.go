@@ -7,6 +7,7 @@ package gcp_kms
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 
@@ -37,6 +38,8 @@ type Config struct {
 
 	KMSKeyName string `hcl:"kms_encryption_key"`
 	KeyLength  int    `hcl:"key_length"`
+
+	AdditionalAuthenticatedData string `hcl:"additional_authenticated_data,optional"`
 }
 
 func stringAttrEnvFallback(val string, env string) string {
@@ -105,6 +108,10 @@ func (c Config) Build() (keyprovider.KeyProvider, keyprovider.KeyMeta, error) {
 			return nil, nil, &keyprovider.ErrInvalidConfiguration{Message: "the string provided in credentials is neither valid json nor a valid file path"}
 		}
 
+		//nolint:staticcheck // [option.WithCredentialsJSON] is deprecated
+		// upstream, but we're waiting to see how the hashicorp/google provider
+		// reacts to that deprecation so we can then mimic their strategy as
+		// closely as possible.
 		credOptions = append(credOptions, option.WithCredentialsJSON([]byte(contents)))
 	}
 
@@ -144,10 +151,25 @@ func (c Config) Build() (keyprovider.KeyProvider, keyprovider.KeyMeta, error) {
 		return nil, nil, &keyprovider.ErrInvalidConfiguration{Message: "key_length must be less than the GCP limit of 1024"}
 	}
 
+	var aad []byte
+	// Additional Authenticated Data is an integrity check for GCP KMS, used both for encryption
+	// and decryption: https://docs.cloud.google.com/kms/docs/additional-authenticated-data
+	if c.AdditionalAuthenticatedData != "" {
+		var err error
+		aad, err = base64.StdEncoding.DecodeString(c.AdditionalAuthenticatedData)
+		if err != nil {
+			return nil, nil, &keyprovider.ErrInvalidConfiguration{Message: "additional_authenticated_data must be valid standard base64", Cause: err}
+		}
+		if len(aad) > 64*1024 {
+			return nil, nil, &keyprovider.ErrInvalidConfiguration{Message: "additional_authenticated_data must be less than the GCP limit of 64 KiB"}
+		}
+	}
+
 	return &keyProvider{
-		svc:       svc,
-		ctx:       ctx,
-		keyName:   c.KMSKeyName,
-		keyLength: c.KeyLength,
+		svc:                         svc,
+		ctx:                         ctx,
+		keyName:                     c.KMSKeyName,
+		keyLength:                   c.KeyLength,
+		additionalAuthenticatedData: aad,
 	}, new(keyMeta), nil
 }

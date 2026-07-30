@@ -44,48 +44,28 @@ import (
 // execution grow and change.
 type Operations interface {
 	//////////////////////////////////////////////////////////////////////////////
-	//// Provider-related operations
-	//////////////////////////////////////////////////////////////////////////////
-
-	// ProviderInstanceConfig determines what configuration value should be used
-	// to configure the provider instance at the given address.
-	//
-	// Real implementations of this use the configuration evaluator to
-	// finalize the provider configuration based on other values that have been
-	// previously resolved. A valid execution graph ensures that this method is
-	// not called until all of the required upstream values are available.
-	ProviderInstanceConfig(
-		ctx context.Context,
-		instAddr addrs.AbsProviderInstanceCorrect,
-	) (*ProviderInstanceConfig, tfdiags.Diagnostics)
-
-	// ProviderInstanceOpen attempts to launch and configure a provider plugin
-	// using the given configuration.
-	ProviderInstanceOpen(
-		ctx context.Context,
-		config *ProviderInstanceConfig,
-	) (*ProviderClient, tfdiags.Diagnostics)
-
-	// ProviderInstanceClose shuts down a previously-opened provider plugin.
-	//
-	// A valid execution graph ensures that this is called only after all other
-	// operations using the given client have either completed or have been
-	// cancelled due to an upstream error, and so implementers can assume the
-	// client is not currently being used elsewhere and will not be used again
-	// after this method returns.
-	ProviderInstanceClose(
-		ctx context.Context,
-		client *ProviderClient,
-	) tfdiags.Diagnostics
-
-	//////////////////////////////////////////////////////////////////////////////
 	//// Resource-related operations that are relevant to multiple resource modes.
 	//// (mode-specific operations follow below)
 	//////////////////////////////////////////////////////////////////////////////
 
+	// ResourceInstanceCurrentMeta returns the metadata for the given resource
+	// instance's "current" (non-deposed) object address, providing information
+	// that is relevant regardless of what action is being taken for the object
+	// or whether it is "desired" or not.
+	//
+	// For deposed object metadata, use [Operations.ManagedDeposedMeta] instead.
+	ResourceInstanceCurrentMeta(
+		ctx context.Context,
+		instAddr addrs.AbsResourceInstance,
+		prior *ResourceInstanceObject,
+	) (*ResourceInstanceObjectMeta, tfdiags.Diagnostics)
+
 	// ResourceInstanceDesired returns a representation of the "desired state"
-	// for the given resource instance, or a nil pointer if the given resource
-	// instance is not currently declared at all.
+	// for the resource instance object whose metadata is provided, or a nil
+	// pointer if the given resource instance is not currently declared at all.
+	//
+	// Deposed objects cannot be "desired", so only metadata for current objects
+	// may be passed to this operation.
 	//
 	// Real implementations of this use the configuration evaluator to finalize
 	// the resource instance configuration based on other values that have been
@@ -98,7 +78,7 @@ type Operations interface {
 	// resource instance.
 	ResourceInstanceDesired(
 		ctx context.Context,
-		instAddr addrs.AbsResourceInstance,
+		meta *ResourceInstanceObjectMeta,
 	) (*eval.DesiredResourceInstance, tfdiags.Diagnostics)
 
 	// ResourceInstancePrior returns a representation of the "prior state" for
@@ -147,10 +127,10 @@ type Operations interface {
 	// or must return at least one error diagnostic.
 	ManagedFinalPlan(
 		ctx context.Context,
+		metadata *ResourceInstanceObjectMeta,
 		desired *eval.DesiredResourceInstance,
 		prior *ResourceInstanceObject,
 		plannedVal cty.Value,
-		providerClient *ProviderClient,
 	) (*ManagedResourceObjectFinalPlan, tfdiags.Diagnostics)
 
 	// ManagedApply uses the given provider client to apply the given plan.
@@ -170,7 +150,7 @@ type Operations interface {
 	// occurs when performing a "create then destroy" replace operation, so
 	// that a total failure of the "create" step leaves OpenTofu still tracking
 	// the previous object (which was presumably deposed earlier in the same
-	// apply phase using ManagedDepose) as the current object.
+	// apply phase using ManagedPerformDepose) as the current object.
 	//
 	// This method must return whatever object was left as "current" in the
 	// state, including possibly returning the "current-ized" version of
@@ -188,11 +168,10 @@ type Operations interface {
 		ctx context.Context,
 		plan *ManagedResourceObjectFinalPlan,
 		fallback *ResourceInstanceObject,
-		providerClient *ProviderClient,
 	) (*ResourceInstanceObject, tfdiags.Diagnostics)
 
-	// ManagedDepose takes a "current" object for some resource instance and
-	// changes it to be a "deposed" object for the same resource instance,
+	// ManagedPerformDepose takes a "current" object for some resource instance
+	// and changes it to be a "deposed" object for the same resource instance,
 	// returning a new representation of the object with its
 	// pseudorandomly-chosen unique DeposedKey.
 	//
@@ -208,10 +187,24 @@ type Operations interface {
 	// anything. In practice though the planning engine should not include
 	// this operation unless it found an existing current object that needs to
 	// be deposed as part of a create-then-destroy "replace" change.
-	ManagedDepose(
+	ManagedPerformDepose(
 		ctx context.Context,
 		object *ResourceInstanceObject,
+		deletePlan *ManagedResourceObjectFinalPlan,
 	) (*ResourceInstanceObject, tfdiags.Diagnostics)
+
+	// ManagedDeposedMeta returns the metadata for a deposed object belonging
+	// to the given resource instance, providing information that might be
+	// needed in order to delete the object.
+	//
+	// For current object metadata, use [Operations.ResourceInstanceCurrentMeta]
+	// instead.
+	ManagedDeposedMeta(
+		ctx context.Context,
+		instAddr addrs.AbsResourceInstance,
+		deposedKey states.DeposedKey,
+		prior *ResourceInstanceObject,
+	) (*ResourceInstanceObjectMeta, tfdiags.Diagnostics)
 
 	// ManagedAlreadyDeposed returns a deposed object from the prior state,
 	// nor nil if there is no such object.
@@ -226,7 +219,7 @@ type Operations interface {
 	// [Operations.ResourceInstancePrior] but returns a deposed object rather
 	// than a current object.
 	//
-	// [Operations.ManagedDepose] deals with the more common case where a
+	// [Operations.ManagedPerformDepose] deals with the more common case where a
 	// previously-"current" object becomes deposed during the apply phase as
 	// part of handling a "create then destroy' replace operation.
 	ManagedAlreadyDeposed(
@@ -284,52 +277,5 @@ type Operations interface {
 		ctx context.Context,
 		desired *eval.DesiredResourceInstance,
 		plannedVal cty.Value,
-		providerClient *ProviderClient,
 	) (*ResourceInstanceObject, tfdiags.Diagnostics)
-
-	//////////////////////////////////////////////////////////////////////////////
-	/// Resource-related operations that are relevant only for ephemeral resources.
-	//////////////////////////////////////////////////////////////////////////////
-
-	// EphemeralOpen uses the given provider client to "open" the given
-	// ephemeral resource instance, making it ready for indirect use by
-	// subsequent operations that rely on its results.
-	//
-	// If the provider requires periodic "renewal" of the ephemeral object
-	// then the implementer of this method must arrange for that to happen
-	// until either the corresponding call to [EphemeralClose] or until
-	// execution has completed without such a call, typically due to an error
-	// having occurred along the way. Renewal is considered an implementation
-	// detail of whatever is managing a provider's operation, with the execution
-	// graph just assuming that ephemeral objects remain valid _somehow_ for
-	// the full duration of their use.
-	EphemeralOpen(
-		ctx context.Context,
-		desired *eval.DesiredResourceInstance,
-		providerClient *ProviderClient,
-	) (*OpenEphemeralResourceInstance, tfdiags.Diagnostics)
-
-	// EphemeralState refines the open ephemeral resource instance into the
-	// required resource object state
-	//
-	// Execution graph processing automatically passes the result of this
-	// function to [Operations.ResourceInstancePostconditions] when appropriate,
-	// propagating any additional diagnostics it returns, and so implementers of
-	// this method should not attempt to handle postconditions themselves.
-	EphemeralState(
-		ctx context.Context,
-		ephemeral *OpenEphemeralResourceInstance,
-	) (*ResourceInstanceObject, tfdiags.Diagnostics)
-
-	// EphemeralClose calls Close on the open ephemeral resource instance
-	//
-	// A valid execution graph ensures that this is called only after all other
-	// operations using the given object have either completed or have been
-	// cancelled due to an upstream error, and so implementers can assume the
-	// object is not currently being used elsewhere and will not be used again
-	// after this method returns.
-	EphemeralClose(
-		ctx context.Context,
-		ephemeral *OpenEphemeralResourceInstance,
-	) tfdiags.Diagnostics
 }

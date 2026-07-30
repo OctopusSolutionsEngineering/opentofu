@@ -10,12 +10,13 @@ import (
 	"fmt"
 	"hash/fnv"
 
+	"github.com/zclconf/go-cty/cty"
+
 	"github.com/opentofu/opentofu/internal/addrs"
 	"github.com/opentofu/opentofu/internal/configs/configschema"
 	"github.com/opentofu/opentofu/internal/configs/hcl2shim"
 	"github.com/opentofu/opentofu/internal/providers"
 	"github.com/opentofu/opentofu/internal/tfdiags"
-	"github.com/zclconf/go-cty/cty"
 )
 
 var _ providers.Interface = &providerForTest{}
@@ -68,14 +69,15 @@ func (p providerForTest) PlanResourceChange(_ context.Context, r providers.PlanR
 	}
 
 	resSchema, _ := p.schema.SchemaForResourceType(addrs.ManagedResourceMode, r.TypeName)
+	schema := resSchema.Block
 
 	// Filter out computed-only attributes from the schema to avoid them being used incorrectly
 	// later on. This resolves https://github.com/opentofu/opentofu/issues/3644
-	filteredConfig := filterComputedOnlyAttributes(resSchema, r.Config)
+	filteredConfig := filterComputedOnlyAttributes(schema, r.Config)
 
 	var resp providers.PlanResourceChangeResponse
 	resp.PlannedState, resp.Diagnostics = newMockValueComposer(r.TypeName).
-		ComposeBySchema(resSchema, filteredConfig, p.overrideValues)
+		ComposeBySchema(schema, filteredConfig, p.overrideValues)
 
 	return resp
 }
@@ -109,26 +111,33 @@ func (p providerForTest) ReadDataSource(_ context.Context, r providers.ReadDataS
 	resSchema, _ := p.schema.SchemaForResourceType(addrs.DataResourceMode, r.TypeName)
 
 	var resp providers.ReadDataSourceResponse
-
-	resp.State, resp.Diagnostics = newMockValueComposer(r.TypeName).
-		ComposeBySchema(resSchema, r.Config, p.overrideValues)
+	resp.State, resp.Diagnostics = newMockValueComposer(r.TypeName).ComposeBySchema(resSchema.Block, r.Config, p.overrideValues)
 
 	return resp
 }
 
-func (p providerForTest) OpenEphemeralResource(_ context.Context, _ providers.OpenEphemeralResourceRequest) (resp providers.OpenEphemeralResourceResponse) {
-	// TODO ephemeral testing support - implement me when adding testing support
-	panic("implement me")
+func (p providerForTest) OpenEphemeralResource(_ context.Context, r providers.OpenEphemeralResourceRequest) (resp providers.OpenEphemeralResourceResponse) {
+	resSchema, _ := p.schema.SchemaForResourceType(addrs.EphemeralResourceMode, r.TypeName)
+
+	resp.Result, resp.Diagnostics = newMockValueComposer(r.TypeName).ComposeBySchema(resSchema.Block, r.Config, p.overrideValues)
+	return resp
 }
 
 func (p providerForTest) RenewEphemeralResource(_ context.Context, _ providers.RenewEphemeralResourceRequest) (resp providers.RenewEphemeralResourceResponse) {
 	// TODO ephemeral testing support - implement me when adding testing support
+
+	// In order to fix the issue reported in https://github.com/opentofu/opentofu/issues/4251, OpenEphemeralResource and CloseEphemeralResource
+	// had their `panic` call removed and implemented properly to ensure that `tofu test` can be executed against a
+	// configuration containing `ephemeral` blocks. The fix provided just fixed the panic without implementing any
+	// testing functionality for ephemeral resources. Therefore, RenewEphemeralResource has no reason to be implemented
+	// because it cannot be reached as it relies on OpenEphemeralResource to return a specific value in the RenewAt to
+	// have this called. Without any testing functionality to mock the value for RenewAt, this will never be called so
+	// we want to have the panic in place.
 	panic("implement me")
 }
 
 func (p providerForTest) CloseEphemeralResource(_ context.Context, _ providers.CloseEphemeralResourceRequest) (resp providers.CloseEphemeralResourceResponse) {
-	// TODO ephemeral testing support - implement me when adding testing support
-	panic("implement me")
+	return resp
 }
 
 // ValidateProviderConfig is irrelevant when provider is mocked or overridden.
@@ -176,6 +185,10 @@ func (p providerForTest) ValidateDataResourceConfig(ctx context.Context, r provi
 
 func (p providerForTest) UpgradeResourceState(ctx context.Context, r providers.UpgradeResourceStateRequest) providers.UpgradeResourceStateResponse {
 	return p.internal.UpgradeResourceState(ctx, r)
+}
+
+func (p providerForTest) UpgradeResourceIdentity(ctx context.Context, r providers.UpgradeResourceIdentityRequest) providers.UpgradeResourceIdentityResponse {
+	return p.internal.UpgradeResourceIdentity(ctx, r)
 }
 
 func (p providerForTest) ValidateEphemeralConfig(ctx context.Context, request providers.ValidateEphemeralConfigRequest) providers.ValidateEphemeralConfigResponse {

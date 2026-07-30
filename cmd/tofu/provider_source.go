@@ -19,6 +19,7 @@ import (
 	"github.com/opentofu/opentofu/internal/addrs"
 	"github.com/opentofu/opentofu/internal/command/cliconfig"
 	"github.com/opentofu/opentofu/internal/getproviders"
+	"github.com/opentofu/opentofu/internal/oci"
 	"github.com/opentofu/opentofu/internal/tfdiags"
 )
 
@@ -31,7 +32,7 @@ func providerSource(
 	configs []*cliconfig.ProviderInstallation,
 	registryClientConfig *cliconfig.RegistryProtocolsConfig,
 	services *disco.Disco,
-	getOCICredsPolicy ociCredsPolicyBuilder,
+	getOCICredsPolicy oci.OCICredsPolicyBuilder,
 	originalWorkingDir string,
 ) (getproviders.Source, tfdiags.Diagnostics) {
 	if len(configs) == 0 {
@@ -53,14 +54,14 @@ func explicitProviderSource(
 	config *cliconfig.ProviderInstallation,
 	registryClientConfig *cliconfig.RegistryProtocolsConfig,
 	services *disco.Disco,
-	getOCICredsPolicy ociCredsPolicyBuilder,
+	getOCICredsPolicy oci.OCICredsPolicyBuilder,
 ) (getproviders.Source, tfdiags.Diagnostics) {
 	var diags tfdiags.Diagnostics
 	var searchRules []getproviders.MultiSourceSelector
 
 	log.Printf("[DEBUG] Explicit provider installation configuration is set")
 	for _, methodConfig := range config.Methods {
-		source, moreDiags := providerSourceForCLIConfigLocation(ctx, methodConfig.Location, methodConfig.Retries, registryClientConfig, services, getOCICredsPolicy)
+		source, moreDiags := providerSourceForCLIConfigLocation(ctx, methodConfig.Location, methodConfig.Retries, methodConfig.Trusted, registryClientConfig, services, getOCICredsPolicy)
 		diags = diags.Append(moreDiags)
 		if moreDiags.HasErrors() {
 			continue
@@ -219,13 +220,14 @@ func providerSourceForCLIConfigLocation(
 	ctx context.Context,
 	loc cliconfig.ProviderInstallationLocation,
 	locationRetries cliconfig.ProviderInstallationMethodRetries,
+	trustedSource cliconfig.ProviderInstallationMethodTrusted,
 	registryClientConfig *cliconfig.RegistryProtocolsConfig,
 	services *disco.Disco,
-	makeOCICredsPolicy ociCredsPolicyBuilder,
+	makeOCICredsPolicy oci.OCICredsPolicyBuilder,
 ) (getproviders.Source, tfdiags.Diagnostics) {
 	if loc == cliconfig.ProviderInstallationDirect {
 		return getproviders.NewMemoizeSource(
-			getproviders.NewRegistrySource(ctx, services, newRegistryHTTPClient(ctx, registryClientConfig), providerSourceLocationConfig(locationRetries)),
+			getproviders.NewRegistrySource(ctx, services, newRegistryHTTPClient(ctx, registryClientConfig), providerSourceLocationConfig(locationRetries, trustedSource)),
 		), nil
 	}
 
@@ -259,7 +261,7 @@ func providerSourceForCLIConfigLocation(
 		// this client is not suitable for the HTTP mirror source, so we
 		// don't use this client directly.
 		httpTimeout := newRegistryHTTPClient(ctx, registryClientConfig).HTTPClient.Timeout
-		return getproviders.NewHTTPMirrorSource(ctx, url, services.CredentialsSource(), httpTimeout, providerSourceLocationConfig(locationRetries)), nil
+		return getproviders.NewHTTPMirrorSource(ctx, url, services.CredentialsSource(), httpTimeout, providerSourceLocationConfig(locationRetries, trustedSource)), nil
 
 	case cliconfig.ProviderInstallationOCIMirror:
 		mappingFunc := loc.RepositoryMapping
@@ -277,7 +279,7 @@ func providerSourceForCLIConfigLocation(
 					// This deals with only a small number of errors that we can't catch during CLI config validation
 					return nil, fmt.Errorf("invalid credentials configuration for OCI registries: %w", err)
 				}
-				return getOCIRepositoryStore(ctx, registryDomain, repositoryName, credsPolicy)
+				return oci.GetOCIRepositoryStore(ctx, registryDomain, repositoryName, credsPolicy)
 			},
 		), nil
 
@@ -305,7 +307,7 @@ func providerDevOverrides(configs []*cliconfig.ProviderInstallation) map[addrs.P
 // TF_PROVIDER_DOWNLOAD_RETRY env variable and is meant to be passed through
 // [getproviders.Source] all the way down to the [getproviders.PackageLocation]
 // to be able to tweak the configurations of the http clients used there.
-func providerSourceLocationConfig(locationRetries cliconfig.ProviderInstallationMethodRetries) getproviders.LocationConfig {
+func providerSourceLocationConfig(locationRetries cliconfig.ProviderInstallationMethodRetries, trustAllHashes cliconfig.ProviderInstallationMethodTrusted) getproviders.LocationConfig {
 	// If there is no configuration for the retries in .tofurc, get the one from env variable
 	retries, configured := locationRetries()
 	if !configured {
@@ -313,6 +315,7 @@ func providerSourceLocationConfig(locationRetries cliconfig.ProviderInstallation
 	}
 	return getproviders.LocationConfig{
 		ProviderDownloadRetries: retries,
+		TrustAllHashes:          trustAllHashes != nil && trustAllHashes(),
 	}
 }
 

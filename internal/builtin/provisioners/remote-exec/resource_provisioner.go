@@ -15,6 +15,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/apparentlymart/go-shquot/shquot"
 	"github.com/mitchellh/go-linereader"
 	"github.com/opentofu/opentofu/internal/communicator"
 	"github.com/opentofu/opentofu/internal/communicator/remote"
@@ -97,7 +98,7 @@ func (p *provisioner) ValidateProvisionerConfig(req provisioners.ValidateProvisi
 	return resp
 }
 
-func (p *provisioner) ProvisionResource(req provisioners.ProvisionResourceRequest) (resp provisioners.ProvisionResourceResponse) {
+func (p *provisioner) ProvisionResource(_ context.Context, req provisioners.ProvisionResourceRequest) (resp provisioners.ProvisionResourceResponse) {
 	if req.Connection.IsNull() {
 		resp.Diagnostics = resp.Diagnostics.Append(tfdiags.WholeContainingBody(
 			tfdiags.Error,
@@ -269,7 +270,7 @@ func runScripts(ctx context.Context, o provisioners.UIOutput, comm communicator.
 		}
 
 		cmd = &remote.Cmd{
-			Command: remotePath,
+			Command: shquot.POSIXShell([]string{remotePath}),
 			Stdout:  outW,
 			Stderr:  errW,
 		}

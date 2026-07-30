@@ -7,6 +7,7 @@ package local
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -18,6 +19,8 @@ import (
 	"github.com/opentofu/opentofu/internal/configs"
 	"github.com/opentofu/opentofu/internal/configs/configload"
 	"github.com/opentofu/opentofu/internal/plans/planfile"
+	"github.com/opentofu/opentofu/internal/states"
+	"github.com/opentofu/opentofu/internal/states/statefile"
 	"github.com/opentofu/opentofu/internal/states/statemgr"
 	"github.com/opentofu/opentofu/internal/tfdiags"
 	"github.com/opentofu/opentofu/internal/tofu"
@@ -28,7 +31,7 @@ import (
 var _ backend.Local = (*Local)(nil)
 
 // backend.Local implementation.
-func (b *Local) LocalRun(ctx context.Context, op *backend.Operation) (*backend.LocalRun, statemgr.Full, tfdiags.Diagnostics) {
+func (b *Local) LocalRun(ctx context.Context, stopCtx context.Context, op *backend.Operation) (*backend.LocalRun, statemgr.Full, tfdiags.Diagnostics) {
 	// Make sure the type is invalid. We use this as a way to know not
 	// to ask for input/validate. We're modifying this through a pointer,
 	// so we're mutating an object that belongs to the caller here, which
@@ -39,11 +42,11 @@ func (b *Local) LocalRun(ctx context.Context, op *backend.Operation) (*backend.L
 
 	op.StateLocker = op.StateLocker.WithContext(context.Background())
 
-	lr, _, stateMgr, diags := b.localRun(ctx, op)
+	lr, _, stateMgr, diags := b.localRun(ctx, stopCtx, op)
 	return lr, stateMgr, diags
 }
 
-func (b *Local) localRun(ctx context.Context, op *backend.Operation) (*backend.LocalRun, *configload.Snapshot, statemgr.Full, tfdiags.Diagnostics) {
+func (b *Local) localRun(ctx context.Context, stopCtx context.Context, op *backend.Operation) (*backend.LocalRun, *configload.Snapshot, statemgr.Full, tfdiags.Diagnostics) {
 	var diags tfdiags.Diagnostics
 
 	// Get the latest state.
@@ -111,7 +114,7 @@ func (b *Local) localRun(ctx context.Context, op *backend.Operation) (*backend.L
 		op.ConfigLoader.ImportSourcesFromSnapshot(configSnap)
 	} else {
 		log.Printf("[TRACE] backend/local: populating backend.LocalRun for current working directory")
-		ret, configSnap, ctxDiags = b.localRunDirect(ctx, op, ret, &coreOpts, s)
+		ret, configSnap, ctxDiags = b.localRunDirect(ctx, stopCtx, op, ret, &coreOpts, s)
 	}
 	diags = diags.Append(ctxDiags)
 	if diags.HasErrors() {
@@ -144,7 +147,7 @@ func (b *Local) localRun(ctx context.Context, op *backend.Operation) (*backend.L
 	return ret, configSnap, s, diags
 }
 
-func (b *Local) localRunDirect(ctx context.Context, op *backend.Operation, run *backend.LocalRun, coreOpts *tofu.ContextOpts, s statemgr.Full) (*backend.LocalRun, *configload.Snapshot, tfdiags.Diagnostics) {
+func (b *Local) localRunDirect(ctx context.Context, stopCtx context.Context, op *backend.Operation, run *backend.LocalRun, coreOpts *tofu.ContextOpts, s statemgr.Full) (*backend.LocalRun, *configload.Snapshot, tfdiags.Diagnostics) {
 	var diags tfdiags.Diagnostics
 
 	// Load the configuration using the caller-provided configuration loader.
@@ -191,9 +194,7 @@ func (b *Local) localRunDirect(ctx context.Context, op *backend.Operation, run *
 	} else {
 		// If interactive input is enabled, we might gather some more variable
 		// values through interactive prompts.
-		// TODO: Need to route the operation context through into here, so that
-		// the interactive prompts can be sensitive to its timeouts/etc.
-		rawVariables = b.interactiveCollectVariables(ctx, op.Variables, config.Module.Variables, op.UIIn)
+		rawVariables = b.interactiveCollectVariables(stopCtx, op.Variables, config.Module.Variables, op.UIIn)
 	}
 
 	variables, varDiags := backend.ParseVariableValues(rawVariables, config.Module.Variables)
@@ -216,6 +217,15 @@ func (b *Local) localRunDirect(ctx context.Context, op *backend.Operation, run *
 	// Set ApplyOpts for direct runs to pass through the CLI flag
 	run.ApplyOpts = &tofu.ApplyOpts{
 		SuppressForgetErrorsDuringDestroy: op.SuppressForgetErrorsDuringDestroy,
+		BackupStateForPanic: func(state *states.State) {
+			stateFile := statemgr.Export(s)
+			if stateFile == nil {
+				stateFile = statefile.New(state, "", 0)
+			}
+			stateFile.State = state
+			diags = b.backupStateForError(stateFile, errors.New("Graph Traversal Panic"), op.View)
+			op.View.Diagnostics(diags)
+		},
 	}
 
 	// For a "direct" local run, the input state is the most recently stored
@@ -290,6 +300,18 @@ func (b *Local) localRunForPlanFile(ctx context.Context, op *backend.Operation, 
 	run.ApplyOpts = &tofu.ApplyOpts{
 		SetVariables:                      declaredVars,
 		SuppressForgetErrorsDuringDestroy: op.SuppressForgetErrorsDuringDestroy,
+		BackupStateForPanic: func(state *states.State) {
+			var stateFile *statefile.File
+			if currentStateMeta != nil {
+				stateFile = statefile.New(state, currentStateMeta.Lineage, currentStateMeta.Serial)
+			} else {
+				stateFile = &statefile.File{
+					State: state,
+				}
+			}
+			diags = b.backupStateForError(stateFile, errors.New("Graph Traversal Panic"), op.View)
+			op.View.Diagnostics(diags)
+		},
 	}
 
 	// NOTE: We're intentionally comparing the current locks with the

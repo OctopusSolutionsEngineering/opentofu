@@ -118,6 +118,8 @@ func TestContext2Validate_varNoDefaultExplicitType(t *testing.T) {
 }
 
 func TestContext2Validate_computedVar(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureValidate)
+
 	p := testProvider("aws")
 	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
 		Provider: providers.Schema{
@@ -176,6 +178,7 @@ func TestContext2Validate_computedVar(t *testing.T) {
 }
 
 func TestContext2Validate_computedInFunction(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureValidate)
 	p := testProvider("aws")
 	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
 		ResourceTypes: map[string]providers.Schema{
@@ -216,6 +219,7 @@ func TestContext2Validate_computedInFunction(t *testing.T) {
 // them to fail during "plan" since we can't know if the computed values
 // can be realized during a plan.
 func TestContext2Validate_countComputed(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureValidate)
 	p := testProvider("aws")
 	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
 		ResourceTypes: map[string]providers.Schema{
@@ -271,6 +275,43 @@ func TestContext2Validate_countNegative(t *testing.T) {
 	diags := c.Validate(context.Background(), m)
 	if !diags.HasErrors() {
 		t.Fatalf("succeeded; want error")
+	}
+}
+
+func TestContext2Validate_countTooLarge(t *testing.T) {
+	p := testProvider("aws")
+	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
+		ResourceTypes: map[string]providers.Schema{
+			"aws_instance": {
+				Block: &configschema.Block{
+					Attributes: map[string]*configschema.Attribute{},
+				},
+			},
+		},
+	}
+	m := testModuleInline(t, map[string]string{
+		"main.tf": `
+resource "aws_instance" "test" {
+  count = 2147483648
+}
+`,
+	})
+	c := testContext2(t, &ContextOpts{
+		Plugins: plugins.NewLibrary(map[addrs.Provider]providers.Factory{
+			addrs.NewDefaultProvider("aws"): testProviderFuncFixed(p),
+		}, nil),
+	})
+
+	diags := c.Validate(context.Background(), m)
+	if !diags.HasErrors() {
+		t.Fatalf("succeeded; want error")
+	}
+	got := diags.Err().Error()
+	if !strings.Contains(got, `2147483647`) {
+		t.Fatalf("wrong error:\ngot:  %s\nwant: message containing %q", got, `2147483647`)
+	}
+	if !strings.Contains(got, `must be less than or equal to`) && !strings.Contains(got, `must be between 0 and`) {
+		t.Fatalf("wrong error:\ngot:  %s\nwant: message containing count limit diagnostic", got)
 	}
 }
 
@@ -381,6 +422,8 @@ func TestContext2Validate_moduleGood(t *testing.T) {
 }
 
 func TestContext2Validate_moduleBadResource(t *testing.T) {
+	SkipExperimental(t, ExperimentalBugDeclareProvider, ExperimentalFeatureValidate)
+
 	m := testModule(t, "validate-module-bad-rc")
 	p := testProvider("aws")
 	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
@@ -410,6 +453,8 @@ func TestContext2Validate_moduleBadResource(t *testing.T) {
 }
 
 func TestContext2Validate_moduleDepsShouldNotCycle(t *testing.T) {
+	SkipExperimental(t, ExperimentalBugDeclareProvider, ExperimentalBugVariableInput)
+
 	m := testModule(t, "validate-module-deps-cycle")
 	p := testProvider("aws")
 	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
@@ -558,6 +603,8 @@ func TestContext2Validate_orphans(t *testing.T) {
 }
 
 func TestContext2Validate_providerConfig_bad(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureProvisioner)
+
 	m := testModule(t, "validate-bad-pc")
 	p := testProvider("aws")
 	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
@@ -700,6 +747,8 @@ func TestContext2Validate_requiredProviderConfig(t *testing.T) {
 }
 
 func TestContext2Validate_provisionerConfig_bad(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureProvisioner)
+
 	m := testModule(t, "validate-bad-prov-conf")
 	p := testProvider("aws")
 	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
@@ -735,6 +784,8 @@ func TestContext2Validate_provisionerConfig_bad(t *testing.T) {
 }
 
 func TestContext2Validate_badResourceConnection(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureProvisioner)
+
 	m := testModule(t, "validate-bad-resource-connection")
 	p := testProvider("aws")
 	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
@@ -767,6 +818,8 @@ func TestContext2Validate_badResourceConnection(t *testing.T) {
 }
 
 func TestContext2Validate_badProvisionerConnection(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureProvisioner)
+
 	m := testModule(t, "validate-bad-prov-connection")
 	p := testProvider("aws")
 	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
@@ -882,6 +935,8 @@ func TestContext2Validate_requiredVar(t *testing.T) {
 }
 
 func TestContext2Validate_resourceConfig_bad(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureValidate)
+
 	m := testModule(t, "validate-bad-rc")
 	p := testProvider("aws")
 	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
@@ -1012,6 +1067,8 @@ func TestContext2Validate_targetedDestroy(t *testing.T) {
 }
 
 func TestContext2Validate_varRefUnknown(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureValidate)
+
 	m := testModule(t, "validate-variable-ref")
 	p := testProvider("aws")
 	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
@@ -1050,6 +1107,8 @@ func TestContext2Validate_varRefUnknown(t *testing.T) {
 // Module variables weren't being interpolated during Validate phase.
 // related to https://github.com/hashicorp/terraform/issues/5322
 func TestContext2Validate_interpolateVar(t *testing.T) {
+	SkipExperimental(t, ExperimentalBugDeclareProvider)
+
 	input := new(MockUIInput)
 
 	m := testModule(t, "input-interpolate-var")
@@ -1082,6 +1141,7 @@ func TestContext2Validate_interpolateVar(t *testing.T) {
 // When module vars reference something that is actually computed, this
 // shouldn't cause validation to fail.
 func TestContext2Validate_interpolateComputedModuleVarDef(t *testing.T) {
+	SkipExperimental(t, ExperimentalBugDeclareProvider)
 	input := new(MockUIInput)
 
 	m := testModule(t, "validate-computed-module-var-ref")
@@ -1132,6 +1192,8 @@ func TestContext2Validate_interpolateMap(t *testing.T) {
 }
 
 func TestContext2Validate_varSensitive(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureValidate)
+
 	// Smoke test through validate where a variable has sensitive applied
 	m := testModuleInline(t, map[string]string{
 		"main.tf": `
@@ -1307,6 +1369,7 @@ output "out" {
 	// Should get this error:
 	// Invalid resource count attribute: The special "count" attribute is no longer supported after Terraform v0.12. Instead, use length(aws_instance.test) to count resource instances.
 	if got, want := diags.Err().Error(), "Invalid resource count attribute:"; !strings.Contains(got, want) {
+		SkipExperimental(t, ExperimentalChangeDiagWording)
 		t.Fatalf("wrong error:\ngot:  %s\nwant: message containing %q", got, want)
 	}
 }
@@ -1337,6 +1400,7 @@ output "out" {
 	// Should get this error:
 	// Reference to undeclared module: No module call named "foo" is declared in the root module.
 	if got, want := diags.Err().Error(), "Reference to undeclared module:"; !strings.Contains(got, want) {
+		SkipExperimental(t, ExperimentalChangeDiagWording)
 		t.Fatalf("wrong error:\ngot:  %s\nwant: message containing %q", got, want)
 	}
 }
@@ -1367,11 +1431,13 @@ output "out" {
 	// Should get this error:
 	// Reference to undeclared module: No module call named "foo" is declared in the root module.
 	if got, want := diags.Err().Error(), "Reference to undeclared module:"; !strings.Contains(got, want) {
+		SkipExperimental(t, ExperimentalChangeDiagWording)
 		t.Fatalf("wrong error:\ngot:  %s\nwant: message containing %q", got, want)
 	}
 }
 
 func TestContext2Validate_invalidDependsOnResourceRef(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureDependsOn, ExperimentalFeatureValidate)
 	// This test is verifying that we raise an error if depends_on
 	// refers to something that doesn't exist in configuration.
 	m := testModuleInline(t, map[string]string{
@@ -1395,12 +1461,13 @@ resource "test_instance" "bar" {
 	}
 	// Should get this error:
 	// Reference to undeclared module: No module call named "foo" is declared in the root module.
-	if got, want := diags.Err().Error(), "Reference to undeclared resource:"; !strings.Contains(got, want) {
+	if got, want := diags.Err().Error(), "Reference to undeclared resource"; !strings.Contains(got, want) {
 		t.Fatalf("wrong error:\ngot:  %s\nwant: message containing %q", got, want)
 	}
 }
 
 func TestContext2Validate_invalidResourceIgnoreChanges(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureIgnoreChanges)
 	// This test is verifying that we raise an error if ignore_changes
 	// refers to something that can be statically detected as not conforming
 	// to the resource type schema.
@@ -1450,6 +1517,7 @@ func TestContext2Validate_variableCustomValidationsFail(t *testing.T) {
 		t.Fatal("succeeded; want errors")
 	}
 	if got, want := diags.Err().Error(), `Invalid value for variable: Value must not be "nope".`; !strings.Contains(got, want) {
+		SkipExperimental(t, ExperimentalChangeDiagWording)
 		t.Fatalf("wrong error:\ngot:  %s\nwant: message containing %q", got, want)
 	}
 }
@@ -1486,6 +1554,7 @@ variable "test" {
 }
 
 func TestContext2Validate_expandModules(t *testing.T) {
+	SkipExperimental(t, ExperimentalBugDeclareProvider)
 	m := testModuleInline(t, map[string]string{
 		"main.tf": `
 module "mod1" {
@@ -1547,6 +1616,7 @@ resource "aws_instance" "foo" {
 }
 
 func TestContext2Validate_expandModulesInvalidCount(t *testing.T) {
+	SkipExperimental(t, ExperimentalChangeDiagWording)
 	m := testModuleInline(t, map[string]string{
 		"main.tf": `
 module "mod1" {
@@ -1607,6 +1677,7 @@ resource "aws_instance" "foo" {
 }
 
 func TestContext2Validate_expandMultipleNestedModules(t *testing.T) {
+	SkipExperimental(t, ExperimentalBugDeclareProvider, ExperimentalBugVariableInput)
 	m := testModuleInline(t, map[string]string{
 		"main.tf": `
 module "modA" {
@@ -1685,6 +1756,8 @@ output "out" {
 }
 
 func TestContext2Validate_invalidModuleDependsOn(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureDependsOn, ExperimentalFeatureValidate)
+
 	// validate module and output depends_on
 	m := testModuleInline(t, map[string]string{
 		"main.tf": `
@@ -1714,15 +1787,21 @@ output "out" {
 		t.Fatalf("wanted 2 diagnostic errors, got %q", diags)
 	}
 
+	want := "Invalid depends_on reference"
+	if experimentalRuntimeEnabled() {
+		want = "Invalid explicit dependency"
+	}
 	for _, d := range diags {
 		des := d.Description().Summary
-		if !strings.Contains(des, "Invalid depends_on reference") {
-			t.Fatalf(`expected "Invalid depends_on reference", got %q`, des)
+		if !strings.Contains(des, want) {
+			t.Fatalf(`expected %s, got %q`, want, des)
 		}
 	}
 }
 
 func TestContext2Validate_invalidOutputDependsOn(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureDependsOn, ExperimentalFeatureValidate)
+
 	// validate module and output depends_on
 	m := testModuleInline(t, map[string]string{
 		"main.tf": `
@@ -1752,15 +1831,21 @@ output "out" {
 		t.Fatalf("wanted 2 diagnostic errors, got %q", diags)
 	}
 
+	want := "Invalid depends_on reference"
+	if experimentalRuntimeEnabled() {
+		want = "Invalid explicit dependency"
+	}
 	for _, d := range diags {
 		des := d.Description().Summary
-		if !strings.Contains(des, "Invalid depends_on reference") {
-			t.Fatalf(`expected "Invalid depends_on reference", got %q`, des)
+		if !strings.Contains(des, want) {
+			t.Fatalf(`expected %s, got %q`, want, des)
 		}
 	}
 }
 
 func TestContext2Validate_rpcDiagnostics(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureValidate)
+
 	// validate module and output depends_on
 	m := testModuleInline(t, map[string]string{
 		"main.tf": `
@@ -1809,6 +1894,7 @@ resource "test_instance" "a" {
 }
 
 func TestContext2Validate_sensitiveProvisionerConfig(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureProvisioner)
 	m := testModule(t, "validate-sensitive-provisioner-config")
 	p := testProvider("aws")
 	p.GetProviderSchemaResponse = &providers.GetProviderSchemaResponse{
@@ -1850,6 +1936,7 @@ func TestContext2Validate_sensitiveProvisionerConfig(t *testing.T) {
 }
 
 func TestContext2Plan_validateMinMaxDynamicBlock(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureValidate)
 	p := new(MockProvider)
 	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
 		ResourceTypes: map[string]*configschema.Block{
@@ -2141,6 +2228,8 @@ resource "aws_instance" "test" {
 }
 
 func TestContext2Validate_precondition_badCondition(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureCondition)
+
 	p := testProvider("aws")
 	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
 		ResourceTypes: map[string]*configschema.Block{
@@ -2187,6 +2276,8 @@ resource "aws_instance" "test" {
 }
 
 func TestContext2Validate_precondition_badErrorMessage(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureCondition)
+
 	p := testProvider("aws")
 	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
 		ResourceTypes: map[string]*configschema.Block{
@@ -2271,6 +2362,8 @@ resource "aws_instance" "test" {
 }
 
 func TestContext2Validate_postcondition_badCondition(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureCondition)
+
 	p := testProvider("aws")
 	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
 		ResourceTypes: map[string]*configschema.Block{
@@ -2323,6 +2416,8 @@ resource "aws_instance" "test" {
 }
 
 func TestContext2Validate_postcondition_badErrorMessage(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureCondition)
+
 	p := testProvider("aws")
 	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
 		ResourceTypes: map[string]*configschema.Block{
@@ -2364,6 +2459,8 @@ resource "aws_instance" "test" {
 }
 
 func TestContext2Validate_precondition_count(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureCondition)
+
 	p := testProvider("aws")
 	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
 		ResourceTypes: map[string]*configschema.Block{
@@ -2478,8 +2575,9 @@ locals {
 	})
 
 	diags := ctx.Validate(context.Background(), m)
+	SkipExperimental(t, ExperimentalFeatureDeprecated)
 	warn := diags.ErrWithWarnings().Error()
-	if !strings.Contains(warn, `The attribute "foo" is deprecated`) {
+	if !strings.Contains(warn, `This value is derived from aws_instance.test.foo`) {
 		t.Fatalf("expected deprecated warning, got: %q\n", warn)
 	}
 }
@@ -2537,6 +2635,8 @@ resource "test_object" "t" {
 }
 
 func TestContext2Validate_providerAliasesInRootMisconfigured(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureValidate)
+
 	m := testModuleInline(t, map[string]string{
 		"main.tf": `
 terraform {
@@ -2566,9 +2666,10 @@ resource "test_object" "t" {
 	if !diags.HasErrors() {
 		t.Fatal("Expected error")
 	}
-
-	if !strings.Contains(diags.Err().Error(), `Provider configuration not present: To work with test_object.t its original provider configuration at provider["registry.opentofu.org/hashicorp/test"].typo is required, but it has been removed`) {
-		t.Fatalf("expected error, got: %q\n", diags.Err().Error())
+	SkipExperimental(t, ExperimentalChangeDiagWording)
+	expected := `Provider configuration not present: To work with test_object.t its original provider configuration at provider["registry.opentofu.org/hashicorp/test"].typo is required, but it has been removed`
+	if !strings.Contains(diags.Err().Error(), expected) {
+		t.Fatalf("expected error %q, got: %q\n", expected, diags.Err().Error())
 	}
 }
 
@@ -2638,6 +2739,8 @@ func TestContext2Validate_importWithForEachOnUnknown(t *testing.T) {
 }
 
 func TestContext2Validate_importIntoModuleResource(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureImport)
+
 	// This test checks that whenever an import is performed into a module resource
 	// the right context is used to evaluate the variables used in the "import" block.
 	// This was added to double check a bug that was discovered in [ImportResolver#ValidateImportIDs]
@@ -2748,6 +2851,7 @@ func TestContext2Validate_importIntoModuleResource(t *testing.T) {
 }
 
 func TestContext2Validate_importIntoUnexistingResourceBlock(t *testing.T) {
+
 	// This checks that validate walk adds an import node into the graph even if the targeted
 	// configuration block does not exist.
 	// This is useful for the situations where the config generation flag is turned on.
@@ -2801,5 +2905,379 @@ func TestContext2Validate_importIntoUnexistingResourceBlock(t *testing.T) {
 	diags := ctx.Validate(context.Background(), m)
 	if diags.HasErrors() {
 		t.Fatalf("unexpected errors\n%s", diags.Err().Error())
+	}
+}
+
+func TestContext2Validate_replaceTriggeredByInvalidAttribute(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureReplaceTB)
+	p := testProvider("test")
+	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
+		ResourceTypes: map[string]*configschema.Block{
+			"test_instance": {
+				Attributes: map[string]*configschema.Attribute{
+					"id": {
+						Type:     cty.String,
+						Computed: true,
+					},
+					"value": {
+						Type:     cty.String,
+						Optional: true,
+					},
+				},
+			},
+		},
+	})
+
+	tests := map[string]struct {
+		config    string
+		wantError bool
+	}{
+		"valid attribute reference": {
+			config: `
+resource "test_instance" "a" {
+  value = "hello"
+}
+
+resource "test_instance" "b" {
+  lifecycle {
+    replace_triggered_by = [test_instance.a.value]
+  }
+}
+`,
+			wantError: false,
+		},
+		"valid resource reference without attribute": {
+			config: `
+resource "test_instance" "a" {
+  value = "hello"
+}
+
+resource "test_instance" "b" {
+  lifecycle {
+    replace_triggered_by = [test_instance.a]
+  }
+}
+`,
+			wantError: false,
+		},
+		"invalid nested attribute reference": {
+			config: `
+resource "test_instance" "a" {
+  value = "hello"
+}
+
+resource "test_instance" "b" {
+  lifecycle {
+    replace_triggered_by = [test_instance.a.foo.bar.baz]
+  }
+}
+`,
+			wantError: true,
+		},
+		"invalid single attribute reference": {
+			config: `
+resource "test_instance" "a" {
+  value = "hello"
+}
+
+resource "test_instance" "b" {
+  lifecycle {
+    replace_triggered_by = [test_instance.a.nonexistent]
+  }
+}
+`,
+			wantError: true,
+		},
+		"valid indexed attribute reference": {
+			config: `
+resource "test_instance" "a" {
+  count = 2
+  value = "hello"
+}
+
+resource "test_instance" "b" {
+  lifecycle {
+    replace_triggered_by = [test_instance.a[0].value]
+  }
+}
+`,
+			wantError: false,
+		},
+		"invalid indexed attribute reference": {
+			config: `
+resource "test_instance" "a" {
+  count = 2
+  value = "hello"
+}
+
+resource "test_instance" "b" {
+  lifecycle {
+    replace_triggered_by = [test_instance.a[0].nonexistent]
+  }
+}
+`,
+			wantError: true,
+		},
+		"count.index": {
+			config: `
+resource "test_instance" "a" {
+  count = 2
+  value = "hello"
+}
+
+resource "test_instance" "b" {
+  count = 2
+  lifecycle {
+    replace_triggered_by = [test_instance.a[count.index].value]
+  }
+}
+`,
+			wantError: false,
+		},
+		"each.key": {
+			config: `
+resource "test_instance" "a" {
+  for_each = toset([])
+  value = "hello"
+}
+
+resource "test_instance" "b" {
+  for_each = toset([])
+  lifecycle {
+    replace_triggered_by = [test_instance.a[each.key].value]
+  }
+}
+`,
+			wantError: false,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			m := testModuleInline(t, map[string]string{
+				"main.tf": tc.config,
+			})
+
+			c := testContext2(t, &ContextOpts{
+				Plugins: plugins.NewLibrary(map[addrs.Provider]providers.Factory{
+					addrs.NewDefaultProvider("test"): testProviderFuncFixed(p),
+				}, nil),
+			})
+
+			diags := c.Validate(context.Background(), m)
+			if tc.wantError && !diags.HasErrors() {
+				t.Fatal("succeeded; want error")
+			}
+			if !tc.wantError && diags.HasErrors() {
+				t.Fatalf("unexpected error: %s", diags.Err())
+			}
+		})
+	}
+}
+
+// Test that replace_triggered_by validates attribute traversals against the
+// schema of the referenced resource type, not the schema of the resource
+// containing the lifecycle block.
+func TestContext2Validate_replaceTriggeredByCrossResourceType(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureReplaceTB)
+	// "test_instance" has a "value" attribute; "test_resource" does not.
+	// "test_resource" has a "output" attribute; "test_instance" does not.
+	p := testProvider("test")
+	p.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
+		ResourceTypes: map[string]*configschema.Block{
+			"test_instance": {
+				Attributes: map[string]*configschema.Attribute{
+					"id":    {Type: cty.String, Computed: true},
+					"value": {Type: cty.String, Optional: true},
+				},
+			},
+			"test_resource": {
+				Attributes: map[string]*configschema.Attribute{
+					"id":     {Type: cty.String, Computed: true},
+					"output": {Type: cty.String, Computed: true},
+				},
+			},
+		},
+	})
+	p2 := testProvider("test2")
+	p2.GetProviderSchemaResponse = getProviderSchemaResponseFromProviderSchema(&ProviderSchema{
+		ResourceTypes: map[string]*configschema.Block{
+			"test_instance": {
+				Attributes: map[string]*configschema.Attribute{
+					"id":     {Type: cty.String, Computed: true},
+					"value2": {Type: cty.String, Optional: true},
+				},
+			},
+			"test_resource": {
+				Attributes: map[string]*configschema.Attribute{
+					"id":      {Type: cty.String, Computed: true},
+					"output2": {Type: cty.String, Computed: true},
+				},
+			},
+		},
+	})
+
+	tests := map[string]struct {
+		config    string
+		wantError bool
+	}{
+		"valid attribute reference on different resource type": {
+			config: `
+resource "test_instance" "a" {
+  value = "hello"
+}
+
+resource "test_resource" "b" {
+  lifecycle {
+    replace_triggered_by = [test_instance.a.value]
+  }
+}
+`,
+			wantError: false,
+		},
+		"valid attribute reference on different resource type configured with a different provider": {
+			config: `
+resource "test_instance" "a" {
+  provider = test2
+  value2 = "hello"
+}
+resource "test_resource" "b" {
+  provider = test
+  lifecycle {
+    replace_triggered_by = [test_instance.a.value2]
+  }
+}
+`,
+			wantError: false,
+		},
+		"valid attribute reference on different resource type configured with a different provider and count": {
+			config: `
+resource "test_instance" "a" {
+  count = 2
+  provider = test2
+  value2 = "hello"
+}
+resource "test_resource" "b" {
+  provider = test
+  lifecycle {
+    replace_triggered_by = [test_instance.a[0].value2]
+  }
+}
+`,
+			wantError: false,
+		},
+		"valid attribute reference on different resource type configured with a different provider and for_each": {
+			config: `
+resource "test_instance" "a" {
+  for_each = toset(["a", "b"])
+  provider = test2
+  value2 = "hello"
+}
+resource "test_resource" "b" {
+  provider = test
+  lifecycle {
+    replace_triggered_by = [test_instance.a["b"].value2]
+  }
+}
+`,
+			wantError: false,
+		},
+
+		"valid computed attribute reference on different resource type": {
+			config: `
+resource "test_resource" "a" {}
+
+resource "test_instance" "b" {
+  lifecycle {
+    replace_triggered_by = [test_resource.a.output]
+  }
+}
+`,
+			wantError: false,
+		},
+
+		"valid computed attribute references on multiple resources with the same type": {
+			config: `
+resource "test_resource" "a" {}
+resource "test_resource" "b" {}
+resource "test_resource" "c" {}
+resource "test_instance" "d" {}
+
+resource "test_instance" "b" {
+  lifecycle {
+    replace_triggered_by = [
+      test_resource.a.output,
+      test_resource.b.output,
+      test_resource.c.output,
+      test_instance.d.value
+    ]
+  }
+}
+`,
+			wantError: false,
+		},
+		"invalid attribute reference on different resource type": {
+			config: `
+resource "test_instance" "a" {
+  value = "hello"
+}
+
+resource "test_resource" "b" {
+  lifecycle {
+    replace_triggered_by = [test_instance.a.nonexistent]
+  }
+}
+`,
+			wantError: true,
+		},
+		"attribute exists on containing resource type but not referenced resource type": {
+			config: `
+resource "test_instance" "a" {
+  value = "hello"
+}
+
+resource "test_resource" "b" {
+  lifecycle {
+    replace_triggered_by = [test_instance.a.output]
+  }
+}
+`,
+			wantError: true,
+		},
+		"missing resource referenced in replace_triggered_by": {
+			config: `
+resource "test_instance" "a" {
+  lifecycle {
+    replace_triggered_by = [
+      test_resource.missing.output,
+    ]
+  }
+}
+`,
+			wantError: true,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			m := testModuleInline(t, map[string]string{
+				"main.tf": tc.config,
+			})
+
+			c := testContext2(t, &ContextOpts{
+				Plugins: plugins.NewLibrary(map[addrs.Provider]providers.Factory{
+					addrs.NewDefaultProvider("test"):  testProviderFuncFixed(p),
+					addrs.NewDefaultProvider("test2"): testProviderFuncFixed(p2),
+				}, nil),
+			})
+
+			diags := c.Validate(context.Background(), m)
+			if tc.wantError && !diags.HasErrors() {
+				t.Fatal("succeeded; want error")
+			}
+			if !tc.wantError && diags.HasErrors() {
+				t.Fatalf("unexpected error: %s", diags.Err())
+			}
+		})
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/zclconf/go-cty/cty"
 
 	"github.com/opentofu/opentofu/internal/addrs"
+	"github.com/opentofu/opentofu/internal/lang/exprs"
 	"github.com/opentofu/opentofu/internal/tfdiags"
 )
 
@@ -21,7 +22,7 @@ import (
 // outside of this package.
 //
 // Real implementations of these methods are likely to block until some
-// side-effects have occured elsewhere, such as asking a provider to produce a
+// side-effects have occurred elsewhere, such as asking a provider to produce a
 // planned new state. If that external work depends on information coming from
 // any other part of this package's API then the implementation of that
 // MUST use the mechanisms from package grapheval in order to cooperate
@@ -38,5 +39,5 @@ type ResourceInstanceGlue interface {
 	// placeholder unknown value to use when evaluating downstream expressions.
 	// If there's not enough information to return anything more precise
 	// then returning [cty.DynamicVal] is an acceptable last resort.
-	ResultValue(ctx context.Context, configVal cty.Value, providerInst Maybe[*ProviderInstance], riDeps addrs.Set[addrs.AbsResourceInstance]) (cty.Value, tfdiags.Diagnostics)
+	ResultValue(ctx context.Context, configVal cty.Value, providerInst exprs.FromValue[*ProviderInstance], riDeps addrs.Set[addrs.AbsResourceInstance]) (cty.Value, tfdiags.Diagnostics)
 }

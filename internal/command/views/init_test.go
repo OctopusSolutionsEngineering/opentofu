@@ -135,45 +135,6 @@ func TestInitViews(t *testing.T) {
 			},
 			wantStdout: withNewline("Initializing modules..."),
 		},
-		"initializingCloudBackend": {
-			viewCall: func(init Init) {
-				init.InitializingCloudBackend()
-			},
-			wantJson: []map[string]any{
-				{
-					"@level":   "info",
-					"@message": "Initializing cloud backend...",
-					"@module":  "tofu.ui",
-				},
-			},
-			wantStdout: withNewline("\nInitializing cloud backend..."),
-		},
-		"initializingBackend": {
-			viewCall: func(init Init) {
-				init.InitializingBackend()
-			},
-			wantJson: []map[string]any{
-				{
-					"@level":   "info",
-					"@message": "Initializing the backend...",
-					"@module":  "tofu.ui",
-				},
-			},
-			wantStdout: withNewline("\nInitializing the backend..."),
-		},
-		"backendTypeAlias": {
-			viewCall: func(init Init) {
-				init.BackendTypeAlias("s3", "aws_s3")
-			},
-			wantJson: []map[string]any{
-				{
-					"@level":   "info",
-					"@message": "\"s3\" is an alias for backend type \"aws_s3\"",
-					"@module":  "tofu.ui",
-				},
-			},
-			wantStdout: withNewline("- \"s3\" is an alias for backend type \"aws_s3\""),
-		},
 		"initializingProviderPlugins": {
 			viewCall: func(init Init) {
 				init.InitializingProviderPlugins()
@@ -521,15 +482,6 @@ func TestInitViews(t *testing.T) {
 				},
 			},
 		},
-		// Miscs
-		"help prompt": {
-			viewCall: func(init Init) {
-				init.HelpPrompt()
-			},
-			wantStdout: "",
-			wantStderr: withNewline("\nFor more help on using this command, run:\n  tofu init -help"),
-			wantJson:   []map[string]any{{}},
-		},
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -623,7 +575,7 @@ func testInitHuman(t *testing.T, call func(init Init), wantStdout, wantStderr st
 	}
 }
 
-func testInitJson(t *testing.T, call func(init Init), want []map[string]interface{}) {
+func testInitJson(t *testing.T, call func(init Init), want []map[string]any) {
 	// New type just to assert the fields that we are interested in
 	view, done := testView(t)
 	initView := NewInit(arguments.ViewOptions{ViewType: arguments.ViewJSON}, view)
@@ -636,7 +588,7 @@ func testInitJson(t *testing.T, call func(init Init), want []map[string]interfac
 	testJSONViewOutputEquals(t, output.Stdout(), want)
 }
 
-func testInitMulti(t *testing.T, call func(init Init), wantStdout string, wantStderr string, want []map[string]interface{}) {
+func testInitMulti(t *testing.T, call func(init Init), wantStdout string, wantStderr string, want []map[string]any) {
 	jsonInto, err := os.CreateTemp(t.TempDir(), "json-into-*")
 	if err != nil {
 		t.Fatalf("failed to create the file to write json content into: %s", err)

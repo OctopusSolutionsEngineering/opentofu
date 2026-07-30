@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/hcl/v2"
+	"github.com/opentofu/opentofu/internal/plans/objchange"
 	"github.com/zclconf/go-cty/cty"
 
 	"github.com/opentofu/opentofu/internal/addrs"
@@ -413,7 +414,7 @@ func (d *evaluationStateData) GetModule(_ context.Context, addr addrs.ModuleCall
 			}
 		}
 		if output.Deprecated != "" {
-			val = marks.DeprecatedOutput(val, output.Addr, output.Deprecated, parentCfg.IsModuleCallFromRemoteModule(addr.Name))
+			val = marks.DeprecatedOutput(val, output.Addr, output.Deprecated)
 		}
 
 		_, callInstance := output.Addr.Module.CallInstance()
@@ -523,7 +524,7 @@ func (d *evaluationStateData) GetModule(_ context.Context, addr addrs.ModuleCall
 			}
 
 			if cfg.Deprecated != "" {
-				instance[cfg.Name] = marks.DeprecatedOutput(change.After, change.Addr, cfg.Deprecated, parentCfg.IsModuleCallFromRemoteModule(addr.Name))
+				instance[cfg.Name] = marks.DeprecatedOutput(change.After, change.Addr, cfg.Deprecated)
 			}
 		}
 	}
@@ -794,27 +795,23 @@ func (d *evaluationStateData) GetResource(ctx context.Context, addr addrs.Resour
 			}
 
 		default:
+			if config.Count != nil || config.ForEach != nil {
+				val := cty.DynamicVal
+				if schema.Ephemeral {
+					val = val.Mark(marks.Ephemeral)
+				}
+				return val, diags
+			}
 			// We should only end up here during the validate walk,
 			// since later walks should have at least partial states populated
 			// for all resources in the configuration.
-			if schema.Ephemeral {
-				// If the block that it's evaluated is an ephemeral one, we want to mark
-				// the cty.DynamicVal as ephemeral to ensure that the ephemeral references
-				// check is working properly during walkValidate.
-				// For the sake of consistency, we could use "schema.ValueMarks(...)" instead.
-				// Though, since that method it also gathers sensitive marks from all the nesting
-				// layers, based on the size of the schema and the level of nested objects,
-				// that could add a pretty significant performance penalty for marking in the end
-				// only the root object with the ephemeral mark (only the root object, because the
-				// returned slice of cty.PathValueMarks will not be applicable to the attributes
-				// of cty.DynamicVal, since it is having none).
-				ephemeralMark := cty.PathValueMarks{
-					Path:  make(cty.Path, 0),
-					Marks: cty.NewValueMarks(marks.Ephemeral),
-				}
-				return cty.DynamicVal.MarkWithPaths([]cty.PathValueMarks{ephemeralMark}), diags
+			if schema.ContainsMarks() && config.Enabled == nil {
+				val := schema.UnknownValue()
+				schemaMarks := schema.ValueMarks(val, nil, new(addr.Instance(addrs.NoKey).Absolute(d.ModulePath)))
+				val = val.MarkWithPaths(schemaMarks)
+				return val, diags
 			}
-			return cty.DynamicVal, diags
+			return cty.UnknownVal(ty), diags
 		}
 	}
 
@@ -841,6 +838,12 @@ func (d *evaluationStateData) GetResource(ctx context.Context, addr addrs.Resour
 
 		instAddr := addr.Instance(key).Absolute(d.ModulePath)
 
+		if instAddr.Resource.Resource.Mode == addrs.EphemeralResourceMode {
+			v, ephDiags := d.getEphemeralResourceInstanceValue(schema, instAddr, instance, config)
+			diags = diags.Append(ephDiags)
+			instances[key] = v
+			continue
+		}
 		change := instMap[instAddr.String()]
 		if change != nil {
 			// Don't take any resources that are yet to be deleted into account.
@@ -889,7 +892,7 @@ func (d *evaluationStateData) GetResource(ctx context.Context, addr addrs.Resour
 				}
 				// Now that we know that the schema contains sensitive and/or ephemeral marks,
 				// Combine those marks together to ensure that the value is marked correctly but not double marked
-				schemaMarks := schema.ValueMarks(val, nil)
+				schemaMarks := schema.ValueMarks(val, nil, &instAddr)
 				afterMarks = combinePathValueMarks(afterMarks, schemaMarks)
 			}
 
@@ -912,22 +915,7 @@ func (d *evaluationStateData) GetResource(ctx context.Context, addr addrs.Resour
 		}
 
 		val := instanceObjectSrc.Value
-
-		if schema.ContainsMarks() {
-			var valMarks []cty.PathValueMarks
-			// Now that we know that the schema contains sensitive and/or ephemeral marks,
-			// Combine those marks together to ensure that the value is marked correctly but not double marked
-			val, valMarks = val.UnmarkDeepWithPaths()
-			schemaMarks := schema.ValueMarks(val, nil)
-			if schema.Ephemeral {
-				// Since we are preparing to mark the whole value as ephemeral, we want to remove any other
-				// possible downstream ephemeral marks to avoid having the same mark on multiple layers.
-				valMarks = removeEphemeralMarks(valMarks)
-			}
-			combined := combinePathValueMarks(valMarks, schemaMarks)
-			val = val.MarkWithPaths(combined)
-		}
-		instances[key] = val
+		instances[key] = markedValueBySchema(instAddr, schema, val)
 	}
 
 	// ret should be populated with a valid value in all cases below
@@ -1013,6 +1001,24 @@ func (d *evaluationStateData) GetResource(ctx context.Context, addr addrs.Resour
 	return ret, diags
 }
 
+func markedValueBySchema(addr addrs.AbsResourceInstance, schema *configschema.Block, val cty.Value) cty.Value {
+	if !schema.ContainsMarks() {
+		return val
+	}
+	var valMarks []cty.PathValueMarks
+	// Now that we know that the schema contains sensitive and/or ephemeral marks,
+	// Combine those marks together to ensure that the value is marked correctly but not double marked
+	val, valMarks = val.UnmarkDeepWithPaths()
+	schemaMarks := schema.ValueMarks(val, nil, &addr)
+	if schema.Ephemeral {
+		// Since we are preparing to mark the whole value as ephemeral, we want to remove any other
+		// possible downstream ephemeral marks to avoid having the same mark on multiple layers.
+		valMarks = removeEphemeralMarks(valMarks)
+	}
+	combined := combinePathValueMarks(valMarks, schemaMarks)
+	return val.MarkWithPaths(combined)
+}
+
 func (d *evaluationStateData) getResourceSchema(ctx context.Context, addr addrs.Resource, providerAddr addrs.Provider) *configschema.Block {
 	// TODO: Plumb a useful context.Context through to here.
 	schema, _, diags := d.Evaluator.Plugins.ResourceTypeSchema(ctx, providerAddr, addr.Mode, addr.Type)
@@ -1054,7 +1060,7 @@ func (d *evaluationStateData) GetTerraformAttr(_ context.Context, addr addrs.Ter
 		diags = diags.Append(&hcl.Diagnostic{
 			Severity: hcl.DiagError,
 			Summary:  fmt.Sprintf("Invalid %q attribute", addr.Alias),
-			Detail:   fmt.Sprintf(`The %q object does not have an attribute named %q. The only supported attribute is %s.workspace, the name of the currently-selected workspace.`, addr.Alias, addr.Name, addr.Alias),
+			Detail:   fmt.Sprintf(`The %q object does not have an attribute named %q. The only supported attributes are %s.workspace and %s.applying`, addr.Alias, addr.Name, addr.Alias, addr.Alias),
 			Subject:  rng.ToHCL().Ptr(),
 		})
 		return cty.DynamicVal, diags
@@ -1117,12 +1123,7 @@ func (d *evaluationStateData) GetOutput(_ context.Context, addr addrs.OutputValu
 		// 	val = val.Mark(marks.Ephemeral)
 		// }
 		if config.Deprecated != "" {
-			isRemote := false
-			if p := moduleConfig.Path; p != nil && !p.IsRoot() {
-				_, call := p.Call()
-				isRemote = moduleConfig.IsModuleCallFromRemoteModule(call.Name)
-			}
-			val = marks.DeprecatedOutput(val, output.Addr, config.Deprecated, isRemote)
+			val = marks.DeprecatedOutput(val, output.Addr, config.Deprecated)
 		}
 
 		return val, diags
@@ -1144,6 +1145,40 @@ func (d *evaluationStateData) GetCheckBlock(_ context.Context, addr addrs.Check,
 		Subject:  rng.ToHCL().Ptr(),
 	})
 	return cty.NilVal, diags
+}
+
+// getEphemeralResourceInstanceValue returns the value of the ephemeral instance from the state object.
+// The state object carries also a deferral information so if it was deferred, it cannot return the value
+// since such a value contains only the values from the configuration so we want to return unknown values
+// for all the other attributes.
+func (d *evaluationStateData) getEphemeralResourceInstanceValue(schema *configschema.Block, addr addrs.AbsResourceInstance, ris *states.ResourceInstance, config *configs.Resource) (cty.Value, tfdiags.Diagnostics) {
+	ty := schema.ImpliedType()
+	// During validate, ephemeral values are not opened
+	if d.Operation == walkValidate {
+		return cty.UnknownVal(ty).Mark(marks.Ephemeral), nil
+	}
+	var diags tfdiags.Diagnostics
+	v, err := ris.Current.Decode(ty)
+	if err != nil {
+		return cty.UnknownVal(ty).Mark(marks.Ephemeral), diags.Append(&hcl.Diagnostic{
+			Severity: hcl.DiagError,
+			Summary:  "Invalid resource instance data in state",
+			Detail:   fmt.Sprintf("Instance %s data could not be decoded from the state: %s.", addr, err),
+			Subject:  &config.DeclRange,
+		})
+	}
+	// If we would return cty.UnknownVal(ty), then whatever other ephemeral resources using the config
+	// values of the defered instance would be deferred too.
+	// Instead, we want to return as much information as possible for the requested ephemeral resource.
+	// But, during the encoding of the deferred value, the unknown fields are converted to nil and are not converted back
+	// because of https://github.com/opentofu/opentofu/blob/cba3902c0bf20531ee27d6c76e907fa7348b74e6/internal/states/instance_object.go#L116-L118.
+	// Therefore, we use the same function to convert null values to unknowns and keep as much of the configuration
+	// of the resource in the returned value.
+	if v.Deferred {
+		return objchange.PlannedUnknownObject(schema, v.Value).Mark(marks.Ephemeral), nil
+	}
+
+	return markedValueBySchema(addr, schema, v.Value), nil
 }
 
 // moduleDisplayAddr returns a string describing the given module instance

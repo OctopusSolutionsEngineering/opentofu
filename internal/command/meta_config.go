@@ -16,6 +16,7 @@ import (
 	"github.com/hashicorp/go-retryablehttp"
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
+	"github.com/opentofu/opentofu/internal/command/views"
 	"github.com/zclconf/go-cty/cty"
 	"github.com/zclconf/go-cty/cty/convert"
 
@@ -37,19 +38,13 @@ func (m *Meta) loadConfig(ctx context.Context, rootDir string) (*configs.Config,
 	var diags tfdiags.Diagnostics
 	rootDir = m.WorkingDir.NormalizePath(rootDir)
 
-	loader, err := m.initConfigLoader()
-	if err != nil {
-		diags = diags.Append(err)
-		return nil, diags
-	}
-
 	call, callDiags := m.rootModuleCall(ctx, rootDir)
 	diags = diags.Append(callDiags)
 	if callDiags.HasErrors() {
 		return nil, diags
 	}
 
-	config, hclDiags := loader.LoadConfig(ctx, rootDir, call)
+	config, hclDiags := m.configLoader().LoadConfig(ctx, rootDir, call)
 	diags = diags.Append(hclDiags)
 	return config, diags
 }
@@ -60,19 +55,13 @@ func (m *Meta) loadConfigWithTests(ctx context.Context, rootDir, testDir string)
 	var diags tfdiags.Diagnostics
 	rootDir = m.WorkingDir.NormalizePath(rootDir)
 
-	loader, err := m.initConfigLoader()
-	if err != nil {
-		diags = diags.Append(err)
-		return nil, diags
-	}
-
 	call, vDiags := m.rootModuleCall(ctx, rootDir)
 	diags = diags.Append(vDiags)
 	if diags.HasErrors() {
 		return nil, diags
 	}
 
-	config, hclDiags := loader.LoadConfigWithTests(ctx, rootDir, testDir, call)
+	config, hclDiags := m.configLoader().LoadConfigWithTests(ctx, rootDir, testDir, call)
 	diags = diags.Append(hclDiags)
 	return config, diags
 }
@@ -89,19 +78,13 @@ func (m *Meta) loadSingleModule(ctx context.Context, dir string, load configs.Se
 	var diags tfdiags.Diagnostics
 	dir = m.WorkingDir.NormalizePath(dir)
 
-	loader, err := m.initConfigLoader()
-	if err != nil {
-		diags = diags.Append(err)
-		return nil, diags
-	}
-
 	call, vDiags := m.rootModuleCall(ctx, dir)
 	diags = diags.Append(vDiags)
 	if diags.HasErrors() {
 		return nil, diags
 	}
 
-	module, hclDiags := loader.Parser().LoadConfigDirSelective(dir, call, load)
+	module, hclDiags := m.configLoader().LoadConfigDirSelective(dir, call, load)
 	diags = diags.Append(hclDiags)
 	return module, diags
 }
@@ -117,7 +100,7 @@ func (m *Meta) rootModuleCall(ctx context.Context, rootDir string) (configs.Stat
 		diags = diags.Append(err)
 	}
 
-	call := configs.NewStaticModuleCall(addrs.RootModule, func(variable *configs.Variable) (cty.Value, hcl.Diagnostics) {
+	call := configs.NewStaticModuleCall(addrs.RootModule, hcl.Range{}, func(variable *configs.Variable) (cty.Value, hcl.Diagnostics) {
 		name := variable.Name
 		v, ok := variables[name]
 		if !ok {
@@ -178,38 +161,15 @@ func (m *Meta) loadSingleModuleWithTests(ctx context.Context, dir string, testDi
 	var diags tfdiags.Diagnostics
 	dir = m.WorkingDir.NormalizePath(dir)
 
-	loader, err := m.initConfigLoader()
-	if err != nil {
-		diags = diags.Append(err)
-		return nil, diags
-	}
-
 	call, vDiags := m.rootModuleCall(ctx, dir)
 	diags = diags.Append(vDiags)
 	if diags.HasErrors() {
 		return nil, diags
 	}
 
-	module, hclDiags := loader.Parser().LoadConfigDirWithTests(dir, testDir, call)
+	module, hclDiags := m.configLoader().LoadConfigDirWithTests(dir, testDir, call)
 	diags = diags.Append(hclDiags)
 	return module, diags
-}
-
-// dirIsConfigPath checks if the given path is a directory that contains at
-// least one OpenTofu configuration file (.tf or .tf.json), returning true
-// if so.
-//
-// In the unlikely event that the underlying config loader cannot be initialized,
-// this function optimistically returns true, assuming that the caller will
-// then do some other operation that requires the config loader and get an
-// error at that point.
-func (m *Meta) dirIsConfigPath(dir string) bool {
-	loader, err := m.initConfigLoader()
-	if err != nil {
-		return true
-	}
-
-	return loader.IsConfigDir(dir)
 }
 
 // loadBackendConfig reads configuration from the given directory and returns
@@ -250,13 +210,7 @@ func (m *Meta) loadHCLFile(filename string) (hcl.Body, tfdiags.Diagnostics) {
 	var diags tfdiags.Diagnostics
 	filename = m.WorkingDir.NormalizePath(filename)
 
-	loader, err := m.initConfigLoader()
-	if err != nil {
-		diags = diags.Append(err)
-		return nil, diags
-	}
-
-	body, hclDiags := loader.Parser().LoadHCLFile(filename)
+	body, hclDiags := m.configLoader().LoadHCLFile(filename)
 	diags = diags.Append(hclDiags)
 	return body, diags
 }
@@ -268,22 +222,37 @@ func (m *Meta) loadHCLFile(filename string) (hcl.Body, tfdiags.Diagnostics) {
 // can then be relayed to the end-user. The uiModuleInstallHooks type in
 // this package has a reasonable implementation for displaying notifications
 // via a provided cli.Ui.
-func (m *Meta) installModules(ctx context.Context, rootDir, testsDir string, upgrade, installErrsOnly bool, hooks initwd.ModuleInstallHooks) (abort bool, diags tfdiags.Diagnostics) {
+func (m *Meta) installModules(ctx context.Context, rootDir, testsDir string, upgrade, installErrsOnly bool, hooks initwd.ModuleInstallHooks, view views.Basic) (abort bool, diags tfdiags.Diagnostics) {
 	rootDir = m.WorkingDir.NormalizePath(rootDir)
 
 	err := os.MkdirAll(m.WorkingDir.ModulesDir(), os.ModePerm)
 	if err != nil {
-		diags = diags.Append(fmt.Errorf("failed to create local modules directory: %w", err))
+		diags = diags.Append(tfdiags.Sourceless(
+			tfdiags.Error,
+			"Failed to create local modules directory",
+			err.Error(),
+		))
 		return true, diags
 	}
 
-	loader, err := m.initConfigLoader()
+	loader, err := configload.Initialise(m.configLoader())
 	if err != nil {
+		diags = diags.Append(tfdiags.Sourceless(
+			tfdiags.Error,
+			"Failed to create the config loader",
+			err.Error(),
+		))
 		diags = diags.Append(err)
 		return true, diags
 	}
 
 	inst := initwd.NewModuleInstaller(m.WorkingDir.ModulesDir(), loader, m.registryClient(ctx), m.ModulePackageFetcher)
+	if m.NewRuntimeEnabled() {
+		// Tell the module installer it should use
+		// the configuration for the new runtime instead
+		// of the legacy paths
+		inst.ConfigInstance = m.StaticConfigInstance
+	}
 
 	call, vDiags := m.rootModuleCall(ctx, rootDir)
 	diags = diags.Append(vDiags)
@@ -295,8 +264,11 @@ func (m *Meta) installModules(ctx context.Context, rootDir, testsDir string, upg
 	diags = diags.Append(moreDiags)
 
 	if ctx.Err() == context.Canceled {
-		m.showDiagnostics(diags)
-		m.Ui.Error("Module installation was canceled by an interrupt signal.")
+		diags = diags.Append(tfdiags.Sourceless(
+			tfdiags.Error,
+			"Module installation canceled",
+			"Module installation was canceled by an interrupt signal.",
+		))
 		return true, diags
 	}
 
@@ -312,8 +284,8 @@ func (m *Meta) installModules(ctx context.Context, rootDir, testsDir string, upg
 // can then be relayed to the end-user. The uiModuleInstallHooks type in
 // this package has a reasonable implementation for displaying notifications
 // via a provided cli.Ui.
-func (m *Meta) initDirFromModule(ctx context.Context, targetDir string, addr string, hooks initwd.ModuleInstallHooks) (abort bool, diags tfdiags.Diagnostics) {
-	loader, err := m.initConfigLoader()
+func (m *Meta) initDirFromModule(ctx context.Context, targetDir string, addr string, hooks initwd.ModuleInstallHooks, view views.Basic) (abort bool, diags tfdiags.Diagnostics) {
+	loader, err := configload.Initialise(m.configLoader())
 	if err != nil {
 		diags = diags.Append(err)
 		return true, diags
@@ -323,8 +295,11 @@ func (m *Meta) initDirFromModule(ctx context.Context, targetDir string, addr str
 	moreDiags := initwd.DirFromModule(ctx, loader, targetDir, m.WorkingDir.ModulesDir(), addr, m.registryClient(ctx), m.ModulePackageFetcher, hooks)
 	diags = diags.Append(moreDiags)
 	if ctx.Err() == context.Canceled {
-		m.showDiagnostics(diags)
-		m.Ui.Error("Module initialization was canceled by an interrupt signal.")
+		diags = diags.Append(tfdiags.Sourceless(
+			tfdiags.Error,
+			"Module initialization canceled",
+			"Module initialization was canceled by an interrupt signal.",
+		))
 		return true, diags
 	}
 	return false, diags
@@ -344,7 +319,7 @@ func (m *Meta) initDirFromModule(ctx context.Context, targetDir string, addr str
 //
 // The given value must conform to the given schema. If not, this method will
 // panic.
-func (m *Meta) inputForSchema(given cty.Value, schema *configschema.Block) (cty.Value, error) {
+func (m *Meta) inputForSchema(given cty.Value, schema *configschema.Block, view views.Basic) (cty.Value, error) {
 	if given.IsNull() || !given.IsKnown() {
 		// This is not reasonable input, but we'll tolerate it anyway and
 		// just pass it through for the caller to handle downstream.
@@ -377,7 +352,11 @@ func (m *Meta) inputForSchema(given cty.Value, schema *configschema.Block) (cty.
 			val := cty.StringVal(strVal)
 			val, err = convert.Convert(val, attrS.Type)
 			if err != nil {
-				m.showDiagnostics(fmt.Errorf("Invalid value: %w", err))
+				view.Diagnostics(tfdiags.Diagnostics{tfdiags.Sourceless(
+					tfdiags.Error,
+					"Invalid value",
+					err.Error(),
+				)})
 				continue
 			}
 
@@ -389,61 +368,39 @@ func (m *Meta) inputForSchema(given cty.Value, schema *configschema.Block) (cty.
 	return cty.ObjectVal(retVals), nil
 }
 
-// configSources returns the source cache from the receiver's config loader,
-// which the caller must not modify.
+// configLoader initialises the shared configuration loader if it isn't
+// already initialised.
 //
-// If a config loader has not yet been instantiated then no files could have
-// been loaded already, so this method returns a nil map in that case.
-func (m *Meta) configSources() map[string]*hcl.File {
-	if m.configLoader == nil {
-		return nil
-	}
-
-	return m.configLoader.Sources()
-}
-
-// registerSynthConfigSource allows commands to add synthetic additional source
-// buffers to the config loader's cache of sources (as returned by
-// configSources), which is useful when a command is directly parsing something
-// from the command line that may produce diagnostics, so that diagnostic
-// snippets can still be produced.
+// The configload.Loader is lazy-initialised, meaning that the
+// initialisation is defered to be executed later when a method from it that returns
+// errors can return the loading error.
 //
-// If this is called before a configLoader has been initialized then it will
-// try to initialize the loader but ignore any initialization failure, turning
-// the call into a no-op. (We presume that a caller will later call a different
-// function that also initializes the config loader as a side effect, at which
-// point those errors can be returned.)
-func (m *Meta) registerSynthConfigSource(filename string, src []byte) {
-	loader, err := m.initConfigLoader()
-	if err != nil || loader == nil {
-		return // treated as no-op, since this is best-effort
-	}
-	loader.Parser().ForceFileSource(filename, src)
-}
-
-// initConfigLoader initializes the shared configuration loader if it isn't
-// already initialized.
+// In situations where the caller wants to be sure that the initialisation will succeed
+// before proceeding further in the flow, it must pass the value returned by this method
+// to the configload.Initialise. The error returned by that method will be the initialisation
+// error of the underlying config loader.
 //
-// If the loader cannot be created for some reason then an error is returned
-// and no loader is created. Subsequent calls will presumably see the same
-// error. Loader initialization errors will tend to prevent any further use
-// of most OpenTofu features, so callers should report any error and safely
-// terminate.
-func (m *Meta) initConfigLoader() (*configload.Loader, error) {
-	if m.configLoader == nil {
-		loader, err := configload.NewLoader(&configload.Config{
-			ModulesDir: m.WorkingDir.ModulesDir(),
+// TODO meta-refactor: because there is no one single entry point to initialise the commands, we have
+// to keep this method for the time being, maybe allowing it to outlive the whole refactoring, maybe ending
+// up in keeping Meta only for a limited set of functionality like this one.
+// The intent is to create constructor-like functions to initialise each command, with clear dependencies
+// given as arguments, and then the configload.Loader will be one of those, unifying the way commands are
+// built, also for the normal execution and for the tests too. This would remove from the reasons to keep the Meta
+// struct after the whole refactor.
+func (m *Meta) configLoader() configload.Loader {
+	if m.cfgLoader == nil {
+		loader := configload.NewLazy(&configload.Config{
+			ModulesDir:               m.WorkingDir.ModulesDir(),
+			AllowLanguageExperiments: m.SystemCfg.AllowExperimentalFeatures,
 		})
-		if err != nil {
-			return nil, err
-		}
-		loader.AllowLanguageExperiments(m.AllowExperimentalFeatures)
-		m.configLoader = loader
+		m.cfgLoader = loader
 		if m.View != nil {
 			m.View.SetConfigSources(loader.Sources)
+			m.View.SetModuleSourceAddrs(loader.ModuleSourceAddrs)
+			m.View.SetIsRemoteModuleSource(loader.IsRemoteModuleSource)
 		}
 	}
-	return m.configLoader, nil
+	return m.cfgLoader
 }
 
 // registryClient instantiates and returns a new Registry client.

@@ -17,7 +17,6 @@ import (
 	"github.com/davecgh/go-spew/spew"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	"github.com/mitchellh/cli"
 	"github.com/opentofu/opentofu/internal/command/workdir"
 	"github.com/zclconf/go-cty/cty"
 
@@ -290,7 +289,7 @@ func TestRefresh_defaultState(t *testing.T) {
 	actual := newState.RootModule().Resources["test_instance.foo"].Instances[addrs.NoKey].Current
 	expected := &states.ResourceInstanceObjectSrc{
 		Status:       states.ObjectReady,
-		AttrsJSON:    []byte(`{"ami":null,"id":"yes"}`),
+		AttrsJSON:    []byte("{\n            \"ami\": null,\n            \"id\": \"yes\"\n          }"),
 		Dependencies: []addrs.ConfigResource{},
 	}
 	if !reflect.DeepEqual(actual, expected) {
@@ -361,7 +360,7 @@ func TestRefresh_outPath(t *testing.T) {
 	actual := newState.RootModule().Resources["test_instance.foo"].Instances[addrs.NoKey].Current
 	expected := &states.ResourceInstanceObjectSrc{
 		Status:       states.ObjectReady,
-		AttrsJSON:    []byte(`{"ami":null,"id":"yes"}`),
+		AttrsJSON:    []byte("{\n            \"ami\": null,\n            \"id\": \"yes\"\n          }"),
 		Dependencies: []addrs.ConfigResource{},
 	}
 	if !reflect.DeepEqual(actual, expected) {
@@ -515,13 +514,11 @@ func TestRefresh_varsUnset(t *testing.T) {
 	statePath := testStateFile(t, state)
 
 	p := testProvider()
-	ui := new(cli.MockUi)
 	view, done := testView(t)
 	c := &RefreshCommand{
 		Meta: Meta{
 			WorkingDir:       workdir.NewDir("."),
 			testingOverrides: metaOverridesForProvider(p),
-			Ui:               ui,
 			View:             view,
 		},
 	}
@@ -619,7 +616,7 @@ func TestRefresh_backup(t *testing.T) {
 	actual := newState.RootModule().Resources["test_instance.foo"].Instances[addrs.NoKey].Current
 	expected := &states.ResourceInstanceObjectSrc{
 		Status:       states.ObjectReady,
-		AttrsJSON:    []byte(`{"ami":null,"id":"changed"}`),
+		AttrsJSON:    []byte("{\n            \"ami\": null,\n            \"id\": \"changed\"\n          }"),
 		Dependencies: []addrs.ConfigResource{},
 	}
 	if !reflect.DeepEqual(actual, expected) {
@@ -692,7 +689,7 @@ func TestRefresh_disableBackup(t *testing.T) {
 	actual := newState.RootModule().Resources["test_instance.foo"].Instances[addrs.NoKey].Current
 	expected := &states.ResourceInstanceObjectSrc{
 		Status:       states.ObjectReady,
-		AttrsJSON:    []byte(`{"ami":null,"id":"yes"}`),
+		AttrsJSON:    []byte("{\n            \"ami\": null,\n            \"id\": \"yes\"\n          }"),
 		Dependencies: []addrs.ConfigResource{},
 	}
 	if !reflect.DeepEqual(actual, expected) {

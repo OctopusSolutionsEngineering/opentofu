@@ -9,11 +9,10 @@ import (
 	"bytes"
 	"reflect"
 
-	"github.com/zclconf/go-cty/cty"
-	ctyjson "github.com/zclconf/go-cty/cty/json"
-
 	"github.com/opentofu/opentofu/internal/addrs"
 	"github.com/opentofu/opentofu/internal/legacy/hcl2shim"
+	"github.com/zclconf/go-cty/cty"
+	ctyjson "github.com/zclconf/go-cty/cty/json"
 )
 
 // ResourceInstanceObjectSrc is a not-fully-decoded version of
@@ -71,8 +70,18 @@ type ResourceInstanceObjectSrc struct {
 	Private             []byte
 	Status              ObjectStatus
 	Dependencies        []addrs.ConfigResource
+	DependsOn           []addrs.AbsResourceInstance
 	CreateBeforeDestroy bool
 	SkipDestroy         bool
+	// Deferred is meant for the ephemeral resources state information.
+	// When this is "true", the evaluator will return an unknown value.
+	Deferred bool
+
+	// IdentityJSON contains a JSON-encoded representation of the resource identity for this
+	// resource instance. Similar to AttrsJSON, this is handled in JSON format because
+	// schema versions change over time.
+	IdentityJSON          []byte
+	IdentitySchemaVersion *uint64
 }
 
 // Compare two lists using an given element equal function, ignoring order and duplicates
@@ -158,11 +167,28 @@ func (os *ResourceInstanceObjectSrc) Equal(other *ResourceInstanceObjectSrc) boo
 		return false
 	}
 
+	// This represents a set of dependencies.  They must all be resolved before executing and therefore the order does not matter.
+	if !equalSlicesIgnoreOrder(os.DependsOn, other.DependsOn, addrs.AbsResourceInstance.Equal) {
+		return false
+	}
+
 	if os.CreateBeforeDestroy != other.CreateBeforeDestroy {
 		return false
 	}
 
 	if os.SkipDestroy != other.SkipDestroy {
+		return false
+	}
+
+	if !bytes.Equal(os.IdentityJSON, other.IdentityJSON) {
+		return false
+	}
+
+	if (os.IdentitySchemaVersion == nil) != (other.IdentitySchemaVersion == nil) {
+		return false
+	}
+
+	if os.IdentitySchemaVersion != nil && other.IdentitySchemaVersion != nil && *os.IdentitySchemaVersion != *other.IdentitySchemaVersion {
 		return false
 	}
 
@@ -210,13 +236,29 @@ func (os *ResourceInstanceObjectSrc) Decode(ty cty.Type) (*ResourceInstanceObjec
 		}
 	}
 
+	// Decode identity if present
+	var identity cty.Value
+	if len(os.IdentityJSON) > 0 {
+		identityType, err := ctyjson.ImpliedType(os.IdentityJSON)
+		if err != nil {
+			return nil, err
+		}
+		identity, err = ctyjson.Unmarshal(os.IdentityJSON, identityType)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	return &ResourceInstanceObject{
 		Value:               val,
 		Status:              os.Status,
 		Dependencies:        os.Dependencies,
+		DependsOn:           os.DependsOn,
 		Private:             os.Private,
+		Identity:            identity,
 		CreateBeforeDestroy: os.CreateBeforeDestroy,
 		SkipDestroy:         os.SkipDestroy,
+		Deferred:            os.Deferred,
 	}, nil
 }
 

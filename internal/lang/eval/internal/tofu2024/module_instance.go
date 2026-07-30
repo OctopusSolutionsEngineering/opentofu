@@ -7,12 +7,16 @@ package tofu2024
 
 import (
 	"context"
+	"fmt"
 	"iter"
 	"maps"
 
 	"github.com/apparentlymart/go-workgraph/workgraph"
+	"github.com/zclconf/go-cty/cty"
 
 	"github.com/opentofu/opentofu/internal/addrs"
+	"github.com/opentofu/opentofu/internal/configs"
+	"github.com/opentofu/opentofu/internal/getproviders"
 	"github.com/opentofu/opentofu/internal/lang/eval/internal/configgraph"
 	"github.com/opentofu/opentofu/internal/lang/eval/internal/evalglue"
 	"github.com/opentofu/opentofu/internal/lang/exprs"
@@ -35,6 +39,10 @@ type CompiledModuleInstance struct {
 	moduleCallNodes     map[addrs.ModuleCall]*configgraph.ModuleCall
 	providerConfigNodes map[addrs.LocalProviderConfig]*configgraph.ProviderConfig
 	providerLocalNames  map[addrs.Provider]string
+
+	missingProviders rootMissingProviders
+
+	providerRequirements func(ctx context.Context) (getproviders.Requirements, *getproviders.ProvidersQualification, tfdiags.Diagnostics)
 }
 
 var _ evalglue.CompiledModuleInstance = (*CompiledModuleInstance)(nil)
@@ -68,7 +76,7 @@ func (c *CompiledModuleInstance) CheckAll(ctx context.Context) tfdiags.Diagnosti
 				// we can therefore use it to get the compiled child instance.
 				glue := inst.Glue.(*moduleCallInstanceGlue)
 				maybeCompiled, _ := glue.compiledModuleInstance(ctx)
-				compiled, ok := configgraph.GetKnown(maybeCompiled)
+				compiled, ok := maybeCompiled.ValueOk()
 				if !ok {
 					return
 				}
@@ -95,6 +103,100 @@ func (c *CompiledModuleInstance) ResultValuer(ctx context.Context) exprs.Valuer 
 	return c.moduleInstanceNode
 }
 
+// ResourceInstanceObjectMeta implements [evalglue.CompiledModuleInstance].
+func (c *CompiledModuleInstance) ResourceInstanceObjectMeta(ctx context.Context, addr addrs.ResourceInstanceObject) *evalglue.ConfiguredResourceInstanceObjectMeta {
+	// We'll start with a suitable placeholder to use if there's no mention
+	// of this object in the configuration at all, and then improve it gradually
+	// as we find relevant information in the configuration.
+	ret := &evalglue.ConfiguredResourceInstanceObjectMeta{
+		// In this language edition the author-specified resource type always
+		// matches the provider's chosen resource type name, so we can just
+		// derive these directly from the resource address.
+		Provider:     addrs.ImpliedProviderForUnqualifiedType(addr.InstanceAddr.Resource.ImpliedProvider()),
+		ResourceMode: addr.InstanceAddr.Resource.Mode,
+		ResourceType: addr.InstanceAddr.Resource.Type,
+
+		// An undeclared resource has no configured provider instance, which
+		// means that a caller can know to fall back to an address specified in
+		// the prior state, if any.
+		ProviderInstance: exprs.Known[*addrs.AbsProviderInstanceCorrect](nil),
+	}
+
+	// TODO: The logic here should also consider whether any "removed" block
+	// matches the requested object, and incorporate information derived from
+	// that block if so.
+
+	rsrc, ok := c.resourceNodes[addr.InstanceAddr.Resource]
+	if !ok {
+		// We'll just return the placeholder, then!
+		return ret
+	}
+
+	// In the remaining code we intentionally ignore all diagnostics from
+	// accessing the configgraph.Resource and configgraph.ResourceInstance
+	// methods because our caller is expected to collect them separately
+	// using [CompiledModuleInstance.CheckAll].
+
+	preventDestroyVal, _, _ := rsrc.PreventDestroy(ctx)
+	preventDestroy, _ := exprs.DeriveFromValue(preventDestroyVal, func(v cty.Value) (bool, error) {
+		if v.True() {
+			return true, nil
+		}
+		if v.False() {
+			return false, nil
+		}
+		// No other value is expected, based on the documentation of [configgraph.Resource.PreventDestroy].
+		panic(fmt.Sprintf("method PreventDestroy for %s returned unexpected value %#v", addr.InstanceAddr.Resource, v))
+	})
+	ret.DeletionInvalid = preventDestroy
+
+	destroyProvisioners := rsrc.DestroyProvisioners(ctx, addr.InstanceAddr)
+	ret.PreDestroyProvisioners = prepareResourceProvisioners(destroyProvisioners)
+
+	insts := rsrc.Instances(ctx)
+	inst, ok := insts[addr.InstanceAddr.Key]
+	if !ok {
+		// Only the resource-level settings are used when we're dealing with
+		// a resource instance that is not currently declared in the configuration.
+		return ret
+	}
+
+	providerInst, _ := inst.ProviderInstance(ctx)
+	ret.ProviderInstance, _ = exprs.DeriveFromDerived(providerInst, func(providerInst *configgraph.ProviderInstance) (*addrs.AbsProviderInstanceCorrect, error) {
+		return &providerInst.Addr, nil
+	})
+
+	ret.PostCreateProvisioners = prepareResourceProvisioners(inst.CreateProvisioners)
+
+	// TODO: All of the other fields of ConfiguredResourceInstanceObjectMeta
+
+	return ret
+}
+
+func prepareResourceProvisioners(pcs []configgraph.Provisioner) []*evalglue.ResourceProvisioner {
+	if len(pcs) == 0 {
+		return nil
+	}
+	ret := make([]*evalglue.ResourceProvisioner, 0, len(pcs))
+	for _, pc := range pcs {
+		provisioner := &evalglue.ResourceProvisioner{
+			Type: pc.Type,
+			BuildConfig: func(ctx context.Context, selfValue cty.Value) (evalglue.ResourceProvisionerConfig, tfdiags.Diagnostics) {
+				cfg, diags := pc.Config(ctx, selfValue)
+				return evalglue.ResourceProvisionerConfig{
+					MainConfig:       cfg.Value,
+					ConnectionConfig: cfg.Connection,
+				}, diags
+			},
+		}
+		if pc.OnFailure == configs.ProvisionerOnFailureContinue {
+			provisioner.ContinueOnFailure = true
+		}
+		ret = append(ret, provisioner)
+	}
+	return ret
+}
+
 // ChildModuleCalls implements evalglue.CompiledModuleInstance.
 func (c *CompiledModuleInstance) ChildModuleCalls(_ context.Context) iter.Seq[addrs.ModuleCall] {
 	return maps.Keys(c.moduleCallNodes)
@@ -117,7 +219,7 @@ func (c *CompiledModuleInstance) ChildModuleInstance(ctx context.Context, addr a
 	// we can therefore use it to get the compiled child instance.
 	glue := callInst.Glue.(*moduleCallInstanceGlue)
 	maybeCompiled, _ := glue.compiledModuleInstance(ctx)
-	compiled, ok := configgraph.GetKnown(maybeCompiled)
+	compiled, ok := maybeCompiled.ValueOk()
 	if !ok {
 		return nil
 	}
@@ -154,7 +256,7 @@ func (c *CompiledModuleInstance) ChildModuleInstancesForCall(ctx context.Context
 			// we can therefore use it to get the compiled child instance.
 			glue := callInst.Glue.(*moduleCallInstanceGlue)
 			maybeCompiled, _ := glue.compiledModuleInstance(ctx)
-			compiled, ok := configgraph.GetKnown(maybeCompiled)
+			compiled, ok := maybeCompiled.ValueOk()
 			if !ok {
 				continue
 			}
@@ -190,6 +292,13 @@ func (c *CompiledModuleInstance) ProviderInstance(ctx context.Context, addr addr
 		Alias:     addr.Config.Alias,
 	}
 	node, ok := c.providerConfigNodes[localAddr]
+	if !ok && c.missingProviders != nil {
+		// Try root fallback
+		var diags tfdiags.Diagnostics
+		node, diags = c.missingProviders(localAddr)
+		// TODO we are swallowing a diagnostic here
+		ok = !diags.HasErrors()
+	}
 	if !ok {
 		return nil
 	}
@@ -202,6 +311,11 @@ func (c *CompiledModuleInstance) ProviderInstance(ctx context.Context, addr addr
 // Resources implements evalglue.CompiledModuleInstance.
 func (c *CompiledModuleInstance) Resources(_ context.Context) iter.Seq[addrs.Resource] {
 	return maps.Keys(c.resourceNodes)
+}
+
+// Resource implements evalglue.CompiledModuleInstance.
+func (c *CompiledModuleInstance) Resource(ctx context.Context, addr addrs.Resource) *configgraph.Resource {
+	return c.resourceNodes[addr]
 }
 
 // ResourceInstances implements evalglue.CompiledModuleInstance.
@@ -233,6 +347,11 @@ func (c *CompiledModuleInstance) ResourceInstancesForResource(ctx context.Contex
 			}
 		}
 	}
+}
+
+// ResourceInstancesForResource implements evalglue.ProviderRequirements.
+func (c *CompiledModuleInstance) ProviderRequirements(ctx context.Context) (getproviders.Requirements, *getproviders.ProvidersQualification, tfdiags.Diagnostics) {
+	return c.providerRequirements(ctx)
 }
 
 // AnnounceAllGraphevalRequests implements evalglue.CompiledModuleInstance.

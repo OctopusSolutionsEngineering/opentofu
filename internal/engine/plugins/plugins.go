@@ -30,53 +30,16 @@ type Plugins interface {
 // to know anything about how provider plugins work, or whether plugins are
 // even being used.
 type Providers interface {
-	eval.ProvidersSchema
-
-	// ValidateProviderConfig runs provider-specific logic to check whether
-	// the given configuration is valid. Returns at least one error diagnostic
-	// if the configuration is not valid, and may also return warning
-	// diagnostics regardless of whether the configuration is valid.
-	//
-	// The given config value is guaranteed to be an object conforming to
-	// the schema returned by a previous call to ProviderConfigSchema for
-	// the same provider.
-	ValidateProviderConfig(ctx context.Context, provider addrs.Provider, configVal cty.Value) tfdiags.Diagnostics
-
-	// ValidateResourceConfig runs provider-specific logic to check whether
-	// the given configuration is valid. Returns at least one error diagnostic
-	// if the configuration is not valid, and may also return warning
-	// diagnostics regardless of whether the configuration is valid.
-	//
-	// The given config value is guaranteed to be an object conforming to
-	// the schema returned by a previous call to ResourceTypeSchema for
-	// the same resource type.
-	ValidateResourceConfig(ctx context.Context, provider addrs.Provider, mode addrs.ResourceMode, typeName string, configVal cty.Value) tfdiags.Diagnostics
-
-	// NewConfiguredProvider starts a _configured_ instance of the given
-	// provider using the given configuration value.
-	//
-	// The evaluation system itself makes no use of configured providers, but
-	// higher-level processes wrapping it (e.g. the plan and apply engines)
-	// need to use configured providers for actions related to resources, etc,
-	// and so this is for their benefit to help ensure that they are definitely
-	// creating a configured instance of the same provider that other methods
-	// would be using to return schema information and validation results.
-	//
-	// It's the caller's responsibility to ensure that the given configuration
-	// value is valid according to the provider's schema and validation rules.
-	// That's usually achieved by taking a value provided by the evaluation
-	// system, which would then have already been processed using the results
-	// from [Providers.ProviderConfigSchema] and
-	// [Providers.ValidateProviderConfig]. If the returned diagnostics contains
-	// errors then the [providers.Configured] result is invalid and must not be
-	// used.
-	NewConfiguredProvider(ctx context.Context, provider addrs.Provider, configVal cty.Value) (providers.Configured, tfdiags.Diagnostics)
+	eval.Providers
 
 	Close(ctx context.Context) error
 }
 
 type Provisioners interface {
-	eval.ProvisionersSchema
+	eval.Provisioners
+
+	// [provisioners.Interface.ProvisionResource]
+	ProvisionResource(ctx context.Context, typ string, config cty.Value, connection cty.Value, output ProvisionerOutput) tfdiags.Diagnostics
 }
 
 type newRuntimePlugins struct {
@@ -218,38 +181,44 @@ func (n *newRuntimePlugins) ValidateResourceConfig(ctx context.Context, provider
 	return diags
 }
 
-func (m *newRuntimePlugins) unconfiguredProviderInst(ctx context.Context, provider addrs.Provider) (providers.Unconfigured, tfdiags.Diagnostics) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+func (n *newRuntimePlugins) unconfiguredProviderInst(ctx context.Context, provider addrs.Provider) (providers.Unconfigured, tfdiags.Diagnostics) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
 
-	if running, ok := m.unconfiguredInsts[provider]; ok {
+	if running, ok := n.unconfiguredInsts[provider]; ok {
 		return running, nil
 	}
 
-	inst, diags := m.providers.NewProvider(ctx, provider)
+	inst, diags := n.providers.NewProvider(ctx, provider)
 	if diags.HasErrors() {
 		return nil, diags
 	}
 
-	if m.unconfiguredInsts == nil {
-		m.unconfiguredInsts = make(map[addrs.Provider]providers.Unconfigured)
+	if n.unconfiguredInsts == nil {
+		n.unconfiguredInsts = make(map[addrs.Provider]providers.Unconfigured)
 	}
-	m.unconfiguredInsts[provider] = inst
+	n.unconfiguredInsts[provider] = inst
 	return inst, diags
 }
 
 // ProvisionerConfigSchema implements evalglue.Provisioners.
 func (n *newRuntimePlugins) ProvisionerConfigSchema(ctx context.Context, typeName string) (*configschema.Block, tfdiags.Diagnostics) {
-	// TODO: Implement this in terms of [newRuntimePlugins.provisioners].
-	// But provisioners aren't in scope for our "walking skeleton" phase of
-	// development, so we'll skip this for now.
-	var diags tfdiags.Diagnostics
-	diags = diags.Append(tfdiags.Sourceless(
-		tfdiags.Error,
-		"Cannot use providers in new runtime codepath",
-		fmt.Sprintf("Can't use provisioner %q: new runtime codepath doesn't know how to instantiate provisioners yet", typeName),
-	))
-	return nil, diags
+	schema, err := n.provisioners.ProvisionerSchema(typeName)
+	return schema, tfdiags.New(err)
+}
+
+func (n *newRuntimePlugins) ValidateProvisionerConfig(ctx context.Context, typ string, config cty.Value) tfdiags.Diagnostics {
+	return n.provisioners.ValidateProvisionerConfig(ctx, typ, config)
+}
+
+type ProvisionerOutput func(string)
+
+func (fn ProvisionerOutput) Output(str string) {
+	fn(str)
+}
+
+func (n *newRuntimePlugins) ProvisionResource(ctx context.Context, typ string, config cty.Value, connection cty.Value, output ProvisionerOutput) tfdiags.Diagnostics {
+	return n.provisioners.ProvisionResource(ctx, typ, config, connection, output)
 }
 
 // Close terminates any plugins that are managed by this object and are still

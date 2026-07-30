@@ -12,6 +12,8 @@ import (
 
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
+	"github.com/zclconf/go-cty/cty"
+
 	"github.com/opentofu/opentofu/internal/addrs"
 	"github.com/opentofu/opentofu/internal/communicator/shared"
 	"github.com/opentofu/opentofu/internal/configs"
@@ -20,7 +22,6 @@ import (
 	"github.com/opentofu/opentofu/internal/lang"
 	"github.com/opentofu/opentofu/internal/states"
 	"github.com/opentofu/opentofu/internal/tfdiags"
-	"github.com/zclconf/go-cty/cty"
 )
 
 // traceNameValidateResource is a standardized trace span name we use for the
@@ -84,6 +85,8 @@ type NodeAbstractResource struct {
 
 	ProvisionerSchemas map[string]*configschema.Block
 
+	ReplaceTriggeredBySchemas map[addrs.Resource]*configschema.Block
+
 	// Set from GraphNodeTargetable
 	Targets []addrs.Targetable
 
@@ -116,18 +119,19 @@ type NodeAbstractResource struct {
 }
 
 var (
-	_ GraphNodeReferenceable             = (*NodeAbstractResource)(nil)
-	_ GraphNodeReferencer                = (*NodeAbstractResource)(nil)
-	_ GraphNodeProviderConsumer          = (*NodeAbstractResource)(nil)
-	_ GraphNodeProvisionerConsumer       = (*NodeAbstractResource)(nil)
-	_ GraphNodeConfigResource            = (*NodeAbstractResource)(nil)
-	_ GraphNodeAttachResourceConfig      = (*NodeAbstractResource)(nil)
-	_ GraphNodeAttachResourceSchema      = (*NodeAbstractResource)(nil)
-	_ GraphNodeAttachProvisionerSchema   = (*NodeAbstractResource)(nil)
-	_ GraphNodeAttachProviderMetaConfigs = (*NodeAbstractResource)(nil)
-	_ GraphNodeTargetable                = (*NodeAbstractResource)(nil)
-	_ graphNodeAttachResourceDependsOn   = (*NodeAbstractResource)(nil)
-	_ dag.GraphNodeDotter                = (*NodeAbstractResource)(nil)
+	_ GraphNodeReferenceable                  = (*NodeAbstractResource)(nil)
+	_ GraphNodeReferencer                     = (*NodeAbstractResource)(nil)
+	_ GraphNodeProviderConsumer               = (*NodeAbstractResource)(nil)
+	_ GraphNodeProvisionerConsumer            = (*NodeAbstractResource)(nil)
+	_ GraphNodeConfigResource                 = (*NodeAbstractResource)(nil)
+	_ GraphNodeAttachResourceConfig           = (*NodeAbstractResource)(nil)
+	_ GraphNodeAttachResourceSchema           = (*NodeAbstractResource)(nil)
+	_ GraphNodeAttachReplaceTriggeredBySchema = (*NodeAbstractResource)(nil)
+	_ GraphNodeAttachProvisionerSchema        = (*NodeAbstractResource)(nil)
+	_ GraphNodeAttachProviderMetaConfigs      = (*NodeAbstractResource)(nil)
+	_ GraphNodeTargetable                     = (*NodeAbstractResource)(nil)
+	_ graphNodeAttachResourceDependsOn        = (*NodeAbstractResource)(nil)
+	_ dag.GraphNodeDotter                     = (*NodeAbstractResource)(nil)
 )
 
 // NewNodeAbstractResource creates an abstract resource graph node for
@@ -334,7 +338,6 @@ func (n *NodeAbstractResource) RootReferences() []*addrs.Reference {
 func (n *NodeAbstractResource) DependsOn() []*addrs.Reference {
 	var result []*addrs.Reference
 	if c := n.Config; c != nil {
-
 		for _, traversal := range c.DependsOn {
 			ref, diags := addrs.ParseRef(traversal)
 			if diags.HasErrors() {
@@ -470,6 +473,29 @@ func (n *NodeAbstractResource) AttachProvisionerSchema(name string, schema *conf
 	n.ProvisionerSchemas[name] = schema
 }
 
+// GraphNodeAttachReplaceTriggeredBySchema
+func (n *NodeAbstractResource) ReplaceTriggeredBy() []*addrs.Reference {
+	// If we have no configuration, then we have no replace_triggred_by
+	if n.Config == nil || len(n.Config.TriggersReplacement) == 0 {
+		return nil
+	}
+	result := make([]*addrs.Reference, 0, len(n.Config.TriggersReplacement))
+	for _, expr := range n.Config.TriggersReplacement {
+		refs, _ := lang.ReferencesInExpr(addrs.ParseRef, expr)
+		result = append(result, refs...)
+	}
+
+	return result
+}
+
+// GraphNodeAttachReplaceTriggeredBySchema
+func (n *NodeAbstractResource) AttachReplaceTriggeredBySchema(addr addrs.Resource, schema *configschema.Block) {
+	if n.ReplaceTriggeredBySchemas == nil {
+		n.ReplaceTriggeredBySchemas = make(map[addrs.Resource]*configschema.Block)
+	}
+	n.ReplaceTriggeredBySchemas[addr] = schema
+}
+
 // GraphNodeResource
 func (n *NodeAbstractResource) ResourceAddr() addrs.ConfigResource {
 	return n.Addr
@@ -576,8 +602,8 @@ func (n *NodeAbstractResource) writeResourceState(ctx context.Context, evalCtx E
 	return diags
 }
 
-func isResourceMovedToDifferentType(newAddr, oldAddr addrs.AbsResourceInstance) bool {
-	return newAddr.Resource.Resource.Type != oldAddr.Resource.Resource.Type
+func isResourceMovedToDifferentType(newAddr, oldAddr addrs.AbsResourceInstance, providerAddr, oldProviderAddr addrs.Provider) bool {
+	return newAddr.Resource.Resource.Type != oldAddr.Resource.Resource.Type || !providerAddr.Equals(oldProviderAddr)
 }
 
 // readResourceInstanceState reads the current object for a specific instance in
@@ -606,18 +632,26 @@ func (n *NodeAbstractResourceInstance) readResourceInstanceState(ctx context.Con
 
 	// prevAddr will match the newAddr if the resource wasn't moved (prevRunAddr checks move results)
 	prevAddr := n.prevRunAddr(evalCtx)
+	providerAddr, prevProviderAddr := n.getResourceProviderAddrs(evalCtx, addr)
 	transformArgs := stateTransformArgs{
 		currentAddr:          addr,
+		currentProviderAddr:  providerAddr,
 		prevAddr:             prevAddr,
+		prevProviderAddr:     prevProviderAddr,
 		provider:             provider,
 		objectSrc:            src,
-		currentSchema:        schema,
+		currentSchema:        schema.Block,
 		currentSchemaVersion: currentVersion,
 	}
-	if isResourceMovedToDifferentType(addr, prevAddr) {
+	if evalCtx.MoveResults().AddrMovedExplicit(addr) && isResourceMovedToDifferentType(addr, prevAddr, providerAddr, prevProviderAddr) {
 		src, diags = moveResourceState(transformArgs)
 	} else {
 		src, diags = upgradeResourceState(transformArgs)
+	}
+
+	// Upgrade identity if needed
+	if src != nil && src.IdentityJSON != nil {
+		src, diags = upgradeResourceIdentity(ctx, addr, src, provider, prevProviderAddr, providerSchema, diags)
 	}
 
 	if n.Config != nil {
@@ -627,12 +661,24 @@ func (n *NodeAbstractResourceInstance) readResourceInstanceState(ctx context.Con
 		return nil, diags
 	}
 
-	obj, err := src.Decode(schema.ImpliedType())
+	obj, err := src.Decode(schema.Block.ImpliedType())
 	if err != nil {
 		diags = diags.Append(err)
 	}
 
 	return obj, diags
+}
+
+func (n *NodeAbstractResourceInstance) getResourceProviderAddrs(evalCtx EvalContext, addr addrs.AbsResourceInstance) (addrs.Provider, addrs.Provider) {
+	// temporarily set prevProviderAddr to the current one,
+	// and use it if prevRunState is not set in this context
+	providerAddr := n.Provider()
+	prevProviderAddr := providerAddr
+	prevRunState := evalCtx.PrevRunState()
+	if prevRunState != nil {
+		prevProviderAddr = prevRunState.ResourceProvider(addr.AffectedAbsResource()).Provider
+	}
+	return providerAddr, prevProviderAddr
 }
 
 // readResourceInstanceStateDeposed reads the deposed object for a specific
@@ -665,18 +711,26 @@ func (n *NodeAbstractResourceInstance) readResourceInstanceStateDeposed(ctx cont
 	}
 	// prevAddr will match the newAddr if the resource wasn't moved (prevRunAddr checks move results)
 	prevAddr := n.prevRunAddr(evalCtx)
+	providerAddr, prevProviderAddr := n.getResourceProviderAddrs(evalCtx, addr)
 	transformArgs := stateTransformArgs{
 		currentAddr:          addr,
+		currentProviderAddr:  providerAddr,
 		prevAddr:             prevAddr,
+		prevProviderAddr:     prevProviderAddr,
 		provider:             provider,
 		objectSrc:            src,
-		currentSchema:        schema,
+		currentSchema:        schema.Block,
 		currentSchemaVersion: currentVersion,
 	}
-	if isResourceMovedToDifferentType(addr, prevAddr) {
+	if evalCtx.MoveResults().AddrMovedExplicit(addr) && isResourceMovedToDifferentType(addr, prevAddr, providerAddr, prevProviderAddr) {
 		src, diags = moveResourceState(transformArgs)
 	} else {
 		src, diags = upgradeResourceState(transformArgs)
+	}
+
+	// Upgrade identity if needed
+	if src != nil && src.IdentityJSON != nil {
+		src, diags = upgradeResourceIdentity(ctx, addr, src, provider, prevProviderAddr, providerSchema, diags)
 	}
 
 	if n.Config != nil {
@@ -690,7 +744,7 @@ func (n *NodeAbstractResourceInstance) readResourceInstanceStateDeposed(ctx cont
 		return nil, diags
 	}
 
-	obj, err := src.Decode(schema.ImpliedType())
+	obj, err := src.Decode(schema.Block.ImpliedType())
 	if err != nil {
 		diags = diags.Append(err)
 	}

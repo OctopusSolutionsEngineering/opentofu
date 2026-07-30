@@ -8,14 +8,19 @@ package eval
 import (
 	"context"
 	"fmt"
+	"log"
 
 	"github.com/apparentlymart/go-workgraph/workgraph"
+	"github.com/hashicorp/hcl/v2"
 	"github.com/zclconf/go-cty/cty"
+	"github.com/zclconf/go-cty/cty/function"
 
 	"github.com/opentofu/opentofu/internal/addrs"
 	"github.com/opentofu/opentofu/internal/lang/eval/internal/configgraph"
 	"github.com/opentofu/opentofu/internal/lang/eval/internal/evalglue"
+	"github.com/opentofu/opentofu/internal/lang/exprs"
 	"github.com/opentofu/opentofu/internal/lang/grapheval"
+	"github.com/opentofu/opentofu/internal/providers"
 	"github.com/opentofu/opentofu/internal/tfdiags"
 )
 
@@ -41,11 +46,6 @@ type ApplyGlue interface {
 	// Diagnostics from apply-time actions must be reported through some other
 	// channel controlled by the apply engine itself.
 	ResourceInstanceFinalState(ctx context.Context, addr addrs.AbsResourceInstance) cty.Value
-
-	// ValidateProviderConfig asks the provider of the given address to validate
-	// the given value as being suitable to use when instantiating a configured
-	// instance of that provider.
-	ValidateProviderConfig(ctx context.Context, provider addrs.Provider, configVal cty.Value) tfdiags.Diagnostics
 }
 
 // ApplyOracle creates an [ApplyOracle] object that can be used to support an
@@ -81,8 +81,25 @@ func (c *ConfigInstance) ApplyOracle(ctx context.Context, glue ApplyGlue) (*Appl
 		return nil, diags
 	}
 
+	managedProviders := newManagedProviders(c.evalContext.Providers, func(ctx context.Context, addr addrs.AbsProviderInstanceCorrect) (cty.Value, tfdiags.Diagnostics) {
+		inst := evalglue.ProviderInstance(ctx, rootModuleInstance, addr)
+		if inst == nil {
+			// We should not get here because the apply phase should only ask for
+			// provider instances that were present during the planning phase, and
+			// we should be using exactly the same configuration source code now.
+			return cty.DynamicVal, tfdiags.New(fmt.Errorf("missing configuration for %s", addr))
+		}
+		v, diags := inst.ConfigValue(ctx)
+		return configgraph.PrepareOutgoingValue(v), diags
+
+	})
+
+	// Inject configured providers
+	evalGlue.providers = managedProviders
+
 	return &ApplyOracle{
-		root: rootModuleInstance,
+		root:      rootModuleInstance,
+		providers: managedProviders,
 	}, diags
 }
 
@@ -91,17 +108,30 @@ func (c *ConfigInstance) ApplyOracle(ctx context.Context, glue ApplyGlue) (*Appl
 // and the specialized API implemented by the apply engine in particular.
 type applyingEvalGlue struct {
 	applyEngineGlue ApplyGlue
+	providers       *managedProviders
 }
 
 // ResourceInstanceValue implements [evalglue.Glue].
-func (g *applyingEvalGlue) ResourceInstanceValue(ctx context.Context, ri *configgraph.ResourceInstance, _ cty.Value, _ configgraph.Maybe[*configgraph.ProviderInstance], _ addrs.Set[addrs.AbsResourceInstance]) (cty.Value, tfdiags.Diagnostics) {
-	finalValue := g.applyEngineGlue.ResourceInstanceFinalState(ctx, ri.Addr)
-	return finalValue, nil
+func (g *applyingEvalGlue) ResourceInstanceValue(ctx context.Context, ri *configgraph.ResourceInstance, cfgVal cty.Value, providerInst exprs.FromValue[*configgraph.ProviderInstance], _ addrs.Set[addrs.AbsResourceInstance]) (cty.Value, tfdiags.Diagnostics) {
+	if ri.Addr.Resource.Resource.Mode == addrs.EphemeralResourceMode {
+		if providerInst, ok := providerInst.ValueOk(); ok {
+			return g.providers.OpenEphemeralResourceInstance(ctx, ri.Addr, cfgVal, ri.Provider, &providerInst.Addr)
+		}
+		log.Printf("[WARN] Provider is not yet known for ephemeral resource %s", ri.Addr)
+		return cty.UnknownVal(cty.DynamicPseudoType), nil
+	}
+
+	finalVal := g.applyEngineGlue.ResourceInstanceFinalState(ctx, ri.Addr)
+	return finalVal, nil
 }
 
-// ValidateProviderConfig implements [evalglue.Glue].
-func (g *applyingEvalGlue) ValidateProviderConfig(ctx context.Context, provider addrs.Provider, configVal cty.Value) tfdiags.Diagnostics {
-	return g.applyEngineGlue.ValidateProviderConfig(ctx, provider, configVal)
+// ProviderFunction implements [evalglue.Glue]
+func (g *applyingEvalGlue) ProviderFunction(ctx context.Context, provider addrs.Provider, providerInst exprs.FromValue[*configgraph.ProviderInstance], pf addrs.ProviderFunction, rng hcl.Range) (function.Function, tfdiags.Diagnostics) {
+	if providerInst, ok := providerInst.ValueOk(); ok {
+		return g.providers.ConfiguredFunction(ctx, providerInst.Addr, pf, rng)
+	}
+
+	return g.providers.BuildFunction(ctx, provider, pf, false, rng)
 }
 
 // An ApplyOracle is returned by [ConfigInstance.ApplyOracle] to give the main
@@ -123,7 +153,37 @@ func (g *applyingEvalGlue) ValidateProviderConfig(ctx context.Context, provider 
 // graph that ensures that the apply phase will request information from
 // the oracle only once it has already been made available by earlier work.
 type ApplyOracle struct {
-	root evalglue.CompiledModuleInstance
+	root      evalglue.CompiledModuleInstance
+	providers *managedProviders
+}
+
+// ResourceInstanceObjectMeta returns the subset of metadata for the given
+// resource instance that's defined in the configuration.
+//
+// The apply engine will generally need to combine the result with information
+// from the prior state to produce the full set of metadata for a resource
+// instance object, since this result only reflects what's currently present
+// in the configuration and so is likely to be lacking some or all information
+// for non-desired objects.
+//
+// If the given address identifies an object in a module instance that is not
+// currently in the configuration then the result is nil. Otherwise, whatever
+// language edition implementation is responsible for the relevant module
+// instance uses its own rules to decide the metadata for the requested object.
+//
+// This function always succeeds but may include unknown values as placeholders
+// for metadata whose configuration is defined in an invalid way. The caller
+// is expected to concurrently connect diagnostics from module instances in
+// the configuration, which would then include any errors related to with the
+// metadata settings.
+func (o *ApplyOracle) ResourceInstanceObjectMeta(ctx context.Context, addr addrs.AbsResourceInstanceObject) *ConfiguredResourceInstanceObjectMeta {
+	moduleInst := evalglue.ModuleInstance(ctx, o.root, addr.InstanceAddr.Module)
+	if moduleInst == nil {
+		// The relevant module instance is not currently configured at all,
+		// so the caller will need to rely on the state exclusively for this one.
+		return nil
+	}
+	return moduleInst.ResourceInstanceObjectMeta(ctx, addr.ModuleRelative())
 }
 
 // DesiredResourceInstance returns the [DesiredResourceInstance] object
@@ -154,19 +214,39 @@ func (o *ApplyOracle) DesiredResourceInstance(ctx context.Context, addr addrs.Ab
 	// to do its work.
 	configVal, moreDiags := inst.ConfigValue(ctx)
 	diags = diags.Append(moreDiags)
-	providerInst, _, moreDiags := inst.ProviderInstance(ctx)
+	providerInst, moreDiags := inst.ProviderInstance(ctx)
 	diags = diags.Append(moreDiags)
-	providerInstAddr, _ := configgraph.GetKnown(configgraph.MapMaybe(providerInst, func(pi *configgraph.ProviderInstance) addrs.AbsProviderInstanceCorrect {
-		return pi.Addr
-	}))
-	return &DesiredResourceInstance{
-		Addr:             inst.Addr,
-		ConfigVal:        configVal,
-		Provider:         inst.Provider,
-		ProviderInstance: &providerInstAddr,
-		ResourceMode:     addr.Resource.Resource.Mode,
-		ResourceType:     addr.Resource.Resource.Type,
-	}, diags
+	providerInstAddr, _ := exprs.DeriveFromDerived(providerInst, func(pi *configgraph.ProviderInstance) (addrs.AbsProviderInstanceCorrect, error) {
+		return pi.Addr, nil
+	})
+	// FIXME: DesiredResourceInstance is using a possibly-nil pointer to
+	// addrs.AbsProviderInstanceCorrect as a legacy way to represent a
+	// provider instance address that might be unknown, since it was written
+	// before we had exprs.FromValue. We should eventually update that type
+	// so that its ProviderInstance field is
+	// exprs.FromValue[addrs.AbsProviderInstanceCorrect] but we'll shim to
+	// the legacy form for now.
+	var providerInstAddrPtr *addrs.AbsProviderInstanceCorrect
+	unmarkedProviderInstAddr, _ := providerInstAddr.Unmark()
+	if addr, ok := unmarkedProviderInstAddr.ValueOk(); ok {
+		providerInstAddrPtr = &addr
+	}
+
+	riDeps := addrs.MakeSet[addrs.AbsResourceInstance]()
+	for depInst := range inst.ResourceInstanceDependencies(ctx) {
+		riDeps.Add(depInst.Addr)
+	}
+
+	ret := &DesiredResourceInstance{
+		Addr:                      inst.Addr,
+		ConfigVal:                 configVal,
+		Provider:                  inst.Provider,
+		ProviderInstance:          providerInstAddrPtr,
+		ResourceMode:              addr.Resource.Resource.Mode,
+		ResourceType:              addr.Resource.Resource.Type,
+		RequiredResourceInstances: riDeps,
+	}
+	return ret, diags
 }
 
 // ProviderInstanceConfig returns the configuration value for the given
@@ -177,18 +257,8 @@ func (o *ApplyOracle) DesiredResourceInstance(ctx context.Context, addr addrs.Ab
 // to refer only to provider instances that are present ni the configuration.
 // If this _does_ return cty.NilVal then that suggests a bug in the planning
 // engine, causing it to create an incorrect execution graph.
-func (o *ApplyOracle) ProviderInstanceConfig(ctx context.Context, addr addrs.AbsProviderInstanceCorrect) (cty.Value, tfdiags.Diagnostics) {
-	inst := evalglue.ProviderInstance(ctx, o.root, addr)
-	if inst == nil {
-		// We should not get here because the apply phase should only ask for
-		// provider instances that were present during the planning phase, and
-		// we should be using exactly the same configuration source code now.
-		var diags tfdiags.Diagnostics
-		diags = diags.Append(fmt.Errorf("missing configuration for %s", addr))
-		return cty.DynamicVal, diags
-	}
-	v, diags := inst.ConfigValue(ctx)
-	return configgraph.PrepareOutgoingValue(v), diags
+func (o *ApplyOracle) ProviderInstance(ctx context.Context, addr addrs.AbsProviderInstanceCorrect) (providers.Interface, tfdiags.Diagnostics) {
+	return o.providers.ProviderInstance(ctx, addr)
 }
 
 // AnnounceAllGraphevalRequests calls the given function once for each internal
@@ -205,4 +275,14 @@ func (o *ApplyOracle) ProviderInstanceConfig(ctx context.Context, addr addrs.Abs
 // going to use it for something.
 func (o *ApplyOracle) AnnounceAllGraphevalRequests(announce func(workgraph.RequestID, grapheval.RequestInfo)) {
 	o.root.AnnounceAllGraphevalRequests(announce)
+}
+
+func (o *ApplyOracle) RootOutputs(ctx context.Context) map[string]cty.Value {
+	ctx = grapheval.ContextWithNewWorker(ctx)
+
+	return CollectRootModuleOutputs(ctx, o.root).OutputValues
+}
+
+func (o *ApplyOracle) Close(ctx context.Context) tfdiags.Diagnostics {
+	return checkAll(ctx, o.root).Append(o.providers.Close(ctx))
 }

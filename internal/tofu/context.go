@@ -16,6 +16,7 @@ import (
 
 	"github.com/opentofu/opentofu/internal/configs"
 	"github.com/opentofu/opentofu/internal/encryption"
+	"github.com/opentofu/opentofu/internal/lang/eval"
 	"github.com/opentofu/opentofu/internal/logging"
 	"github.com/opentofu/opentofu/internal/plugins"
 	"github.com/opentofu/opentofu/internal/states"
@@ -43,6 +44,7 @@ type ContextOpts struct {
 	Parallelism int
 	Plugins     plugins.Library
 	Encryption  encryption.Encryption
+	Modules     eval.ExternalModules
 
 	UIInput UIInput
 }
@@ -78,6 +80,7 @@ type Context struct {
 	meta *ContextMeta
 
 	plugins *contextPlugins
+	modules eval.ExternalModules
 
 	hooks   []Hook
 	sh      *stopHook
@@ -142,6 +145,7 @@ func NewContext(opts *ContextOpts) (*Context, tfdiags.Diagnostics) {
 		uiInput: opts.UIInput,
 
 		plugins: plugins,
+		modules: opts.Modules,
 
 		parallelSem:         NewSemaphore(par),
 		providerInputConfig: make(map[string]map[string]cty.Value),
@@ -322,10 +326,6 @@ func (c *Context) watchStop(walker *ContextGraphWalker) (chan struct{}, <-chan s
 // potentially-more-confusing errors from later operations.
 func (c *Context) checkConfigDependencies(config *configs.Config) tfdiags.Diagnostics {
 	var diags tfdiags.Diagnostics
-
-	// This checks the OpenTofu CLI version constraints specified in all of
-	// the modules.
-	diags = diags.Append(CheckCoreVersionRequirements(config))
 
 	// We only check that we have a factory for each required provider, and
 	// assume the caller already assured that any separately-installed

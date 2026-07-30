@@ -262,14 +262,6 @@ func TestLoginViews(t *testing.T) {
 			},
 			wantStdout: "If login is successful, OpenTofu will store the token in plain text in\nthe following file for use by subsequent commands:\n    /home/user/.terraform.d/credentials.tfrc.json\n\n",
 		},
-		"helpPrompt": {
-			viewCall: func(login Login) {
-				login.HelpPrompt("/home/user/.terraform.d/credentials.tfrc.json")
-			},
-			wantJson:   []map[string]any{{}},
-			wantStdout: "",
-			wantStderr: "\nUsage: tofu [global options] login [hostname]\n\n  Retrieves an authentication token for the given hostname, if it supports\n  automatic login, and saves it in a credentials file in your home directory.\n\n  If not overridden by credentials helper settings in the CLI configuration,\n  the credentials will be written to the following local file:\n      /home/user/.terraform.d/credentials.tfrc.json\n\n",
-		},
 		// Diagnostics
 		"warning": {
 			viewCall: func(login Login) {
@@ -375,7 +367,7 @@ func testLoginHuman(t *testing.T, call func(login Login), wantStdout, wantStderr
 	}
 }
 
-func testLoginJson(t *testing.T, call func(login Login), want []map[string]interface{}) {
+func testLoginJson(t *testing.T, call func(login Login), want []map[string]any) {
 	view, done := testView(t)
 	loginView := NewLogin(arguments.ViewOptions{ViewType: arguments.ViewJSON}, view)
 	call(loginView)
@@ -387,7 +379,7 @@ func testLoginJson(t *testing.T, call func(login Login), want []map[string]inter
 	testJSONViewOutputEquals(t, output.Stdout(), want)
 }
 
-func testLoginMulti(t *testing.T, call func(login Login), wantStdout string, wantStderr string, want []map[string]interface{}) {
+func testLoginMulti(t *testing.T, call func(login Login), wantStdout string, wantStderr string, want []map[string]any) {
 	jsonInto, err := os.CreateTemp(t.TempDir(), "json-into-*")
 	if err != nil {
 		t.Fatalf("failed to create the file to write json content into: %s", err)

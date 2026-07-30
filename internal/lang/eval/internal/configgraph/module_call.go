@@ -95,11 +95,21 @@ var _ exprs.Valuer = (*ModuleCall)(nil)
 func (c *ModuleCall) Instances(ctx context.Context) map[addrs.InstanceKey]*ModuleCallInstance {
 	// We ignore the diagnostics here because they will be returned by
 	// the Value method instead.
-	result, _ := c.decideInstances(ctx)
+	result, diags := c.decideInstances(ctx)
+	if diags.HasErrors() && result == nil {
+		// If decideInstances fails for grapheval-related reasons, such as a
+		// dependency cycle, then it won't produce any result at all. The
+		// errors from that would be collected by a concurrent
+		// [Resource.CheckAll] and so we just report no instances here to
+		// allow things to unwind and report that error.
+		// (If decideInstances returns nil without returning any errors then
+		// that's a bug in decideInstances that should be fixed there.)
+		return nil
+	}
 	return result.Instances
 }
 
-func (c *ModuleCall) SourceArguments(ctx context.Context) (Maybe[ModuleSourceArguments], cty.ValueMarks, tfdiags.Diagnostics) {
+func (c *ModuleCall) SourceArguments(ctx context.Context) (exprs.FromValue[ModuleSourceArguments], tfdiags.Diagnostics) {
 	var diags tfdiags.Diagnostics
 
 	sourceVal, moreDiags := c.SourceAddrValuer.Value(ctx)
@@ -108,7 +118,7 @@ func (c *ModuleCall) SourceArguments(ctx context.Context) (Maybe[ModuleSourceArg
 	diags = diags.Append(moreDiags)
 	if diags.HasErrors() {
 		// Not even valid enough to try anything else.
-		return nil, nil, diags
+		return exprs.Unknown[ModuleSourceArguments](), diags
 	}
 
 	// We'll decode both source address and version together so that we can
@@ -178,7 +188,7 @@ func (c *ModuleCall) SourceArguments(ctx context.Context) (Maybe[ModuleSourceArg
 		}
 	}
 	if diags.HasErrors() {
-		return nil, allMarks, diags
+		return exprs.Unknown[ModuleSourceArguments]().WithMarks(allMarks), diags
 	}
 
 	sourceAddr, err := addrs.ParseModuleSource(sourceStr)
@@ -189,7 +199,7 @@ func (c *ModuleCall) SourceArguments(ctx context.Context) (Maybe[ModuleSourceArg
 			Detail:   fmt.Sprintf("Cannot use %q as module source address: %s.", sourceStr, tfdiags.FormatError(err)),
 			Subject:  MaybeHCLSourceRange(c.SourceAddrValuer.ValueSourceRange()),
 		})
-		return nil, allMarks, diags
+		return exprs.Unknown[ModuleSourceArguments]().WithMarks(allMarks), diags
 	}
 	// If the specified source address is a relative path then we need to
 	// resolve it to absolute based on the source address where this
@@ -202,7 +212,7 @@ func (c *ModuleCall) SourceArguments(ctx context.Context) (Maybe[ModuleSourceArg
 			Detail:   fmt.Sprintf("Cannot use %q as module source address: %s.", sourceStr, tfdiags.FormatError(err)),
 			Subject:  MaybeHCLSourceRange(c.SourceAddrValuer.ValueSourceRange()),
 		})
-		return nil, allMarks, diags
+		return exprs.Unknown[ModuleSourceArguments]().WithMarks(allMarks), diags
 	}
 
 	// FIXME: It would be better if the rule for what source address types
@@ -219,7 +229,7 @@ func (c *ModuleCall) SourceArguments(ctx context.Context) (Maybe[ModuleSourceArg
 					Detail:   fmt.Sprintf("Cannot use %q as module version constraints: %s.", versionStr, tfdiags.FormatError(err)),
 					Subject:  MaybeHCLSourceRange(c.VersionConstraintValuer.ValueSourceRange()),
 				})
-				return nil, allMarks, diags
+				return exprs.Unknown[ModuleSourceArguments]().WithMarks(allMarks), diags
 			}
 			allowedVersions = vs
 		} else {
@@ -233,14 +243,14 @@ func (c *ModuleCall) SourceArguments(ctx context.Context) (Maybe[ModuleSourceArg
 				Detail:   fmt.Sprintf("Module source address %q does not support version constraints.", sourceAddr),
 				Subject:  MaybeHCLSourceRange(c.VersionConstraintValuer.ValueSourceRange()),
 			})
-			return nil, allMarks, diags
+			return exprs.Unknown[ModuleSourceArguments]().WithMarks(allMarks), diags
 		}
 	}
 
-	return Known(ModuleSourceArguments{
+	return exprs.Known(ModuleSourceArguments{
 		Source:          sourceAddr,
 		AllowedVersions: allowedVersions,
-	}), allMarks, diags
+	}).WithMarks(allMarks), diags
 }
 
 func (c *ModuleCall) decideInstances(ctx context.Context) (*compiledInstances[*ModuleCallInstance], tfdiags.Diagnostics) {
@@ -248,8 +258,9 @@ func (c *ModuleCall) decideInstances(ctx context.Context) (*compiledInstances[*M
 		// We intentionally ignore diagnostics and marks here because Value
 		// deals with those and skips calling this function at all when
 		// the arguments are too invalid.
-		maybeSourceArgs, _, _ := c.SourceArguments(ctx)
-		sourceArgs, ok := GetKnown(maybeSourceArgs)
+		maybeSourceArgs, _ := c.SourceArguments(ctx)
+		maybeSourceArgs, _ = maybeSourceArgs.Unmark()
+		sourceArgs, ok := maybeSourceArgs.ValueOk()
 		if !ok {
 			// For our purposes here we just use this as a signal that we
 			// should not even try to select instances. [ModuleCall.Value]
@@ -278,8 +289,9 @@ func (c *ModuleCall) StaticCheckTraversal(traversal hcl.Traversal) tfdiags.Diagn
 func (c *ModuleCall) Value(ctx context.Context) (cty.Value, tfdiags.Diagnostics) {
 	// We'll first check whether the arguments specifying which module to
 	// call are valid, because we can't really do anything else if not.
-	maybeSourceArgs, sourceMarks, diags := c.SourceArguments(ctx)
-	sourceArgs, ok := GetKnown(maybeSourceArgs)
+	maybeSourceArgs, diags := c.SourceArguments(ctx)
+	maybeSourceArgs, sourceMarks := maybeSourceArgs.Unmark()
+	sourceArgs, ok := maybeSourceArgs.ValueOk()
 	if !ok {
 		// Either the source information was invalid or was based on something
 		// that failed evaluation upstream, so we'll just bail out here.
@@ -304,6 +316,13 @@ func (c *ModuleCall) Value(ctx context.Context) (cty.Value, tfdiags.Diagnostics)
 	// we have and then collect their individual results into our overall
 	// return value.
 	selection, diags := c.decideInstances(ctx)
+	if diags.HasErrors() && selection == nil {
+		// If decideInstances fails for grapheval-related reasons, such as a
+		// dependency cycle, then it won't produce any result at all, but we
+		// still want to let the diagnostics propagate upwards so that the
+		// error gets reported.
+		return exprs.AsEvalError(cty.DynamicVal), diags
+	}
 	return valueForInstances(ctx, selection).WithMarks(sourceMarks), diags
 }
 

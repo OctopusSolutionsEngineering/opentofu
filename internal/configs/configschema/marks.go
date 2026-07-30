@@ -8,6 +8,7 @@ package configschema
 import (
 	"fmt"
 
+	"github.com/opentofu/opentofu/internal/addrs"
 	"github.com/opentofu/opentofu/internal/lang/marks"
 	"github.com/zclconf/go-cty/cty"
 )
@@ -21,30 +22,54 @@ func copyAndExtendPath(path cty.Path, nextSteps ...cty.PathStep) cty.Path {
 	return newPath
 }
 
+func deprecationMark(subject *addrs.AbsResourceInstance, path cty.Path, message string) any {
+	return marks.DeprecationMark(marks.DeprecationCauseResource(*subject, path, message))
+}
+
 // ValueMarks returns a set of path value marks for a given value and path,
 // based on the sensitive flag for each attribute within the schema. Nested
 // blocks are descended (if present in the given value).
-func (b *Block) ValueMarks(val cty.Value, path cty.Path) []cty.PathValueMarks {
+// If subject is nil, deprecated marks will not be added. This is an intended usage.
+func (b *Block) ValueMarks(val cty.Value, path cty.Path, subject *addrs.AbsResourceInstance) []cty.PathValueMarks {
 	var pvm []cty.PathValueMarks
+
+	var blockMarks []any
 
 	// When the block is marked as ephemeral, the whole value needs to be marked accordingly.
 	// Inner attributes should carry no ephemeral mark.
 	// The ephemerality of the attributes is given by the mark on the val and not by individual marks
 	// as it's the case for the sensitive mark.
 	if b.Ephemeral {
+		blockMarks = append(blockMarks, marks.Ephemeral)
+	}
+	if b.Deprecated && subject != nil {
+		blockMarks = append(blockMarks, deprecationMark(subject, path, b.DeprecationMessage))
+	}
+
+	if len(blockMarks) != 0 {
 		pvm = append(pvm, cty.PathValueMarks{
-			Path:  path, // raw received path is indicating that the whole value needs to be marked as ephemeral.
-			Marks: cty.NewValueMarks(marks.Ephemeral),
+			Path:  path, // raw received path is indicating that the whole value needs to be marked.
+			Marks: cty.NewValueMarks(blockMarks...),
 		})
 	}
+
 	// We can mark attributes as sensitive even if the value is null
 	for name, attrS := range b.Attributes {
+		var attrMarks []any
 		if attrS.Sensitive {
+			attrMarks = append(attrMarks, marks.Sensitive)
+		}
+		if attrS.Deprecated && subject != nil {
+			attrPath := copyAndExtendPath(path, cty.GetAttrStep{Name: name})
+			attrMarks = append(attrMarks, deprecationMark(subject, attrPath, attrS.DeprecationMessage))
+		}
+
+		if len(attrMarks) != 0 {
 			// Create a copy of the path, with this step added, to add to our PathValueMarks slice
 			attrPath := copyAndExtendPath(path, cty.GetAttrStep{Name: name})
 			pvm = append(pvm, cty.PathValueMarks{
 				Path:  attrPath,
-				Marks: cty.NewValueMarks(marks.Sensitive),
+				Marks: cty.NewValueMarks(attrMarks...),
 			})
 		}
 	}
@@ -58,20 +83,20 @@ func (b *Block) ValueMarks(val cty.Value, path cty.Path) []cty.PathValueMarks {
 	for name, attrS := range b.Attributes {
 		// If the attribute has no nested type, or the nested type doesn't
 		// contain any sensitive attributes, skip inspecting it
-		if attrS.NestedType == nil || !attrS.NestedType.ContainsSensitive() {
+		if attrS.NestedType == nil || !attrS.NestedType.ContainsSensitive() && !attrS.NestedType.ContainsDeprecated() {
 			continue
 		}
 
 		// Create a copy of the path, with this step added, to add to our PathValueMarks slice
 		attrPath := copyAndExtendPath(path, cty.GetAttrStep{Name: name})
 
-		pvm = append(pvm, attrS.NestedType.ValueMarks(val.GetAttr(name), attrPath)...)
+		pvm = append(pvm, attrS.NestedType.ValueMarks(val.GetAttr(name), attrPath, subject)...)
 	}
 
 	// Extract marks for nested blocks
 	for name, blockS := range b.BlockTypes {
 		// If our block doesn't contain any sensitive attributes, skip inspecting it
-		if !blockS.Block.ContainsSensitive() {
+		if !blockS.Block.ContainsSensitive() && !blockS.Block.ContainsDeprecated() {
 			continue
 		}
 
@@ -85,14 +110,14 @@ func (b *Block) ValueMarks(val cty.Value, path cty.Path) []cty.PathValueMarks {
 
 		switch blockS.Nesting {
 		case NestingSingle, NestingGroup:
-			pvm = append(pvm, blockS.Block.ValueMarks(blockV, blockPath)...)
+			pvm = append(pvm, blockS.Block.ValueMarks(blockV, blockPath, subject)...)
 		case NestingList, NestingMap, NestingSet:
 			for it := blockV.ElementIterator(); it.Next(); {
 				idx, blockEV := it.Element()
 				// Create a copy of the path, with this block instance's index
 				// step added, to add to our PathValueMarks slice
 				blockInstancePath := copyAndExtendPath(blockPath, cty.IndexStep{Key: idx})
-				morePaths := blockS.Block.ValueMarks(blockEV, blockInstancePath)
+				morePaths := blockS.Block.ValueMarks(blockEV, blockInstancePath, subject)
 				pvm = append(pvm, morePaths...)
 			}
 		default:
@@ -105,7 +130,8 @@ func (b *Block) ValueMarks(val cty.Value, path cty.Path) []cty.PathValueMarks {
 // ValueMarks returns a set of path value marks for a given value and path,
 // based on the sensitive flag for each attribute within the nested attribute.
 // Attributes with nested types are descended (if present in the given value).
-func (o *Object) ValueMarks(val cty.Value, path cty.Path) []cty.PathValueMarks {
+// If subject is nil, deprecated marks will not be added. This is an intended usage.
+func (o *Object) ValueMarks(val cty.Value, path cty.Path, subject *addrs.AbsResourceInstance) []cty.PathValueMarks {
 	var pvm []cty.PathValueMarks
 
 	if val.IsNull() || !val.IsKnown() {
@@ -113,8 +139,10 @@ func (o *Object) ValueMarks(val cty.Value, path cty.Path) []cty.PathValueMarks {
 	}
 
 	for name, attrS := range o.Attributes {
-		// Skip attributes which can never produce sensitive path value marks
-		if !attrS.Sensitive && (attrS.NestedType == nil || !attrS.NestedType.ContainsSensitive()) {
+		// Skip attributes which can never produce sensitive or deprecate path value marks
+		cantProduceSensitive := !attrS.Sensitive && (attrS.NestedType == nil || !attrS.NestedType.ContainsSensitive())
+		cantProduceDeprecated := !attrS.Deprecated && (attrS.NestedType == nil || !attrS.NestedType.ContainsDeprecated()) || subject == nil
+		if cantProduceSensitive && cantProduceDeprecated {
 			continue
 		}
 
@@ -123,16 +151,24 @@ func (o *Object) ValueMarks(val cty.Value, path cty.Path) []cty.PathValueMarks {
 			// Create a path to this attribute
 			attrPath := copyAndExtendPath(path, cty.GetAttrStep{Name: name})
 
+			var attrMarks []any
 			if attrS.Sensitive {
 				// If the entire attribute is sensitive, mark it so
+				attrMarks = append(attrMarks, marks.Sensitive)
+			}
+			if attrS.Deprecated && subject != nil {
+				// If the entire attribute is deprecated, mark it so
+				attrMarks = append(attrMarks, deprecationMark(subject, attrPath, attrS.DeprecationMessage))
+			}
+			if len(attrMarks) != 0 {
 				pvm = append(pvm, cty.PathValueMarks{
 					Path:  attrPath,
-					Marks: cty.NewValueMarks(marks.Sensitive),
+					Marks: cty.NewValueMarks(attrMarks...),
 				})
 			} else {
 				// The attribute has a nested type which contains sensitive
 				// attributes, so recurse
-				pvm = append(pvm, attrS.NestedType.ValueMarks(val.GetAttr(name), attrPath)...)
+				pvm = append(pvm, attrS.NestedType.ValueMarks(val.GetAttr(name), attrPath, subject)...)
 			}
 		case NestingList, NestingMap, NestingSet:
 			// For nested attribute types which have a non-single nesting mode,
@@ -148,16 +184,24 @@ func (o *Object) ValueMarks(val cty.Value, path cty.Path) []cty.PathValueMarks {
 				// representing multiple collection elements.
 				attrPath := copyAndExtendPath(path, cty.IndexStep{Key: idx}, cty.GetAttrStep{Name: name})
 
+				var attrMarks []any
 				if attrS.Sensitive {
 					// If the entire attribute is sensitive, mark it so
+					attrMarks = append(attrMarks, marks.Sensitive)
+				}
+				if attrS.Deprecated && subject != nil {
+					// If the entire attribute is deprecated, mark it so
+					attrMarks = append(attrMarks, deprecationMark(subject, attrPath, attrS.DeprecationMessage))
+				}
+				if len(attrMarks) != 0 {
 					pvm = append(pvm, cty.PathValueMarks{
 						Path:  attrPath,
-						Marks: cty.NewValueMarks(marks.Sensitive),
+						Marks: cty.NewValueMarks(attrMarks...),
 					})
 				} else {
 					// The attribute has a nested type which contains sensitive
 					// attributes, so recurse
-					pvm = append(pvm, attrS.NestedType.ValueMarks(attrV, attrPath)...)
+					pvm = append(pvm, attrS.NestedType.ValueMarks(attrV, attrPath, subject)...)
 				}
 			}
 		default:

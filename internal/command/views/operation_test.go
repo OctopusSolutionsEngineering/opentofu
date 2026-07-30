@@ -25,7 +25,7 @@ import (
 
 func TestOperation_stopping(t *testing.T) {
 	streams, done := terminal.StreamsForTesting(t)
-	v := NewOperation(arguments.ViewHuman, false, NewView(streams))
+	v := NewOperation(arguments.ViewHuman, NewView(streams))
 
 	v.Stopping()
 
@@ -51,7 +51,7 @@ func TestOperation_cancelled(t *testing.T) {
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
 			streams, done := terminal.StreamsForTesting(t)
-			v := NewOperation(arguments.ViewHuman, false, NewView(streams))
+			v := NewOperation(arguments.ViewHuman, NewView(streams))
 
 			v.Cancelled(tc.planMode)
 
@@ -64,7 +64,7 @@ func TestOperation_cancelled(t *testing.T) {
 
 func TestOperation_emergencyDumpState(t *testing.T) {
 	streams, done := terminal.StreamsForTesting(t)
-	v := NewOperation(arguments.ViewHuman, false, NewView(streams))
+	v := NewOperation(arguments.ViewHuman, NewView(streams))
 
 	stateFile := statefile.New(nil, "foo", 1)
 
@@ -75,14 +75,13 @@ func TestOperation_emergencyDumpState(t *testing.T) {
 
 	// Check that the result (on stderr) looks like JSON state
 	raw := done(t).Stderr()
-	var state map[string]interface{}
+	var state map[string]any
 	if err := json.Unmarshal([]byte(raw), &state); err != nil {
 		t.Fatalf("unexpected error parsing dumped state: %s\nraw:\n%s", err, raw)
 	}
 }
 
 func TestOperation_planNoChanges(t *testing.T) {
-
 	tests := map[string]struct {
 		plan     func(schemas *tofu.Schemas) *plans.Plan
 		wantText string
@@ -126,7 +125,7 @@ func TestOperation_planNoChanges(t *testing.T) {
 					addr.Resource.Resource.Mode,
 					addr.Resource.Resource.Type,
 				)
-				ty := schema.ImpliedType()
+				ty := schema.Block.ImpliedType()
 				rc := &plans.ResourceInstanceChange{
 					Addr:        addr,
 					PrevRunAddr: addr,
@@ -142,7 +141,7 @@ func TestOperation_planNoChanges(t *testing.T) {
 						}),
 					},
 				}
-				rcs, err := rc.Encode(ty)
+				rcs, err := rc.Encode(schema)
 				if err != nil {
 					panic(err)
 				}
@@ -167,7 +166,7 @@ func TestOperation_planNoChanges(t *testing.T) {
 					addr.Resource.Resource.Mode,
 					addr.Resource.Resource.Type,
 				)
-				ty := schema.ImpliedType()
+				ty := schema.Block.ImpliedType()
 				rc := &plans.ResourceInstanceChange{
 					Addr:        addr,
 					PrevRunAddr: addr,
@@ -183,7 +182,7 @@ func TestOperation_planNoChanges(t *testing.T) {
 						}),
 					},
 				}
-				rcs, err := rc.Encode(ty)
+				rcs, err := rc.Encode(schema)
 				if err != nil {
 					panic(err)
 				}
@@ -214,7 +213,7 @@ func TestOperation_planNoChanges(t *testing.T) {
 					addr.Resource.Resource.Mode,
 					addr.Resource.Resource.Type,
 				)
-				ty := schema.ImpliedType()
+				ty := schema.Block.ImpliedType()
 				rc := &plans.ResourceInstanceChange{
 					Addr:        addr,
 					PrevRunAddr: addr,
@@ -230,7 +229,7 @@ func TestOperation_planNoChanges(t *testing.T) {
 						}),
 					},
 				}
-				rcs, err := rc.Encode(ty)
+				rcs, err := rc.Encode(schema)
 				if err != nil {
 					panic(err)
 				}
@@ -260,7 +259,6 @@ func TestOperation_planNoChanges(t *testing.T) {
 					addr.Resource.Resource.Mode,
 					addr.Resource.Resource.Type,
 				)
-				ty := schema.ImpliedType()
 				rc := &plans.ResourceInstanceChange{
 					Addr:        addr,
 					PrevRunAddr: addrPrev,
@@ -279,7 +277,7 @@ func TestOperation_planNoChanges(t *testing.T) {
 						}),
 					},
 				}
-				rcs, err := rc.Encode(ty)
+				rcs, err := rc.Encode(schema)
 				if err != nil {
 					panic(err)
 				}
@@ -323,7 +321,7 @@ func TestOperation_planNoChanges(t *testing.T) {
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
 			streams, done := terminal.StreamsForTesting(t)
-			v := NewOperation(arguments.ViewHuman, false, NewView(streams))
+			v := NewOperation(arguments.ViewHuman, NewView(streams))
 			plan := test.plan(schemas)
 			v.Plan(plan, schemas)
 			got := done(t).Stdout()
@@ -336,7 +334,7 @@ func TestOperation_planNoChanges(t *testing.T) {
 
 func TestOperation_plan(t *testing.T) {
 	streams, done := terminal.StreamsForTesting(t)
-	v := NewOperation(arguments.ViewHuman, true, NewView(streams))
+	v := NewOperation(arguments.ViewHuman, NewView(streams).SetRunningInAutomation(true))
 
 	plan := testPlan(t)
 	schemas := testSchemas()
@@ -365,7 +363,7 @@ Plan: 1 to add, 0 to change, 0 to destroy.
 
 func TestOperation_planWithDatasource(t *testing.T) {
 	streams, done := terminal.StreamsForTesting(t)
-	v := NewOperation(arguments.ViewHuman, true, NewView(streams))
+	v := NewOperation(arguments.ViewHuman, NewView(streams).SetRunningInAutomation(true))
 
 	plan := testPlanWithDatasource(t)
 	schemas := testSchemas()
@@ -401,7 +399,7 @@ Plan: 1 to add, 0 to change, 0 to destroy.
 
 func TestOperation_planWithDatasourceAndDrift(t *testing.T) {
 	streams, done := terminal.StreamsForTesting(t)
-	v := NewOperation(arguments.ViewHuman, true, NewView(streams))
+	v := NewOperation(arguments.ViewHuman, NewView(streams).SetRunningInAutomation(true))
 
 	plan := testPlanWithDatasource(t)
 	schemas := testSchemas()
@@ -435,34 +433,6 @@ Plan: 1 to add, 0 to change, 0 to destroy.
 	}
 }
 
-func TestOperation_planWithEphemeral(t *testing.T) {
-	streams, done := terminal.StreamsForTesting(t)
-	v := NewOperation(arguments.ViewHuman, true, NewView(streams))
-
-	plan := testPlanWithEphemeral(t)
-	schemas := testSchemas()
-	v.Plan(plan, schemas)
-
-	want := `
-OpenTofu used the selected providers to generate the following execution
-plan. Resource actions are indicated with the following symbols:
-  + create
-
-OpenTofu will perform the following actions:
-
-  # test_resource.foo will be created
-  + resource "test_resource" "foo" {
-      + foo = "bar"
-      + id  = (known after apply)
-    }
-
-Plan: 1 to add, 0 to change, 0 to destroy.
-`
-
-	if got := done(t).Stdout(); got != want {
-		t.Errorf("unexpected output\ngot:\n%s\nwant:\n%s", got, want)
-	}
-}
 func TestOperation_planNextStep(t *testing.T) {
 	testCases := map[string]struct {
 		path string
@@ -480,7 +450,7 @@ func TestOperation_planNextStep(t *testing.T) {
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
 			streams, done := terminal.StreamsForTesting(t)
-			v := NewOperation(arguments.ViewHuman, false, NewView(streams))
+			v := NewOperation(arguments.ViewHuman, NewView(streams))
 
 			v.PlanNextStep(tc.path, "")
 
@@ -495,7 +465,7 @@ func TestOperation_planNextStep(t *testing.T) {
 // clearer.
 func TestOperation_planNextStepInAutomation(t *testing.T) {
 	streams, done := terminal.StreamsForTesting(t)
-	v := NewOperation(arguments.ViewHuman, true, NewView(streams))
+	v := NewOperation(arguments.ViewHuman, NewView(streams).SetRunningInAutomation(true))
 
 	v.PlanNextStep("", "")
 
@@ -525,7 +495,7 @@ func TestOperationJSON_logs(t *testing.T) {
 	v.Interrupted()
 	v.FatalInterrupt()
 
-	want := []map[string]interface{}{
+	want := []map[string]any{
 		{
 			"@level":   "info",
 			"@message": "Apply cancelled",
@@ -575,7 +545,7 @@ func TestOperationJSON_emergencyDumpState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var stateJSON map[string]interface{}
+	var stateJSON map[string]any
 	err = json.Unmarshal(stateBuf.Bytes(), &stateJSON)
 	if err != nil {
 		t.Fatal(err)
@@ -586,7 +556,7 @@ func TestOperationJSON_emergencyDumpState(t *testing.T) {
 		t.Fatalf("unexpected error dumping state: %s", err)
 	}
 
-	want := []map[string]interface{}{
+	want := []map[string]any{
 		{
 			"@level":   "info",
 			"@message": "Emergency state dump",
@@ -608,13 +578,13 @@ func TestOperationJSON_planNoChanges(t *testing.T) {
 	}
 	v.Plan(plan, nil)
 
-	want := []map[string]interface{}{
+	want := []map[string]any{
 		{
 			"@level":   "info",
 			"@message": "Plan: 0 to add, 0 to change, 0 to destroy.",
 			"@module":  "tofu.ui",
 			"type":     "change_summary",
-			"changes": map[string]interface{}{
+			"changes": map[string]any{
 				"operation": "plan",
 				"add":       float64(0),
 				"import":    float64(0),
@@ -680,16 +650,16 @@ func TestOperationJSON_plan(t *testing.T) {
 	}
 	v.Plan(plan, testSchemas())
 
-	want := []map[string]interface{}{
+	want := []map[string]any{
 		// Create-then-delete should result in replace
 		{
 			"@level":   "info",
 			"@message": "test_resource.boop[0]: Plan to replace",
 			"@module":  "tofu.ui",
 			"type":     "planned_change",
-			"change": map[string]interface{}{
+			"change": map[string]any{
 				"action": "replace",
-				"resource": map[string]interface{}{
+				"resource": map[string]any{
 					"addr":             `test_resource.boop[0]`,
 					"implied_provider": "test",
 					"module":           "",
@@ -706,9 +676,9 @@ func TestOperationJSON_plan(t *testing.T) {
 			"@message": "test_resource.boop[1]: Plan to create",
 			"@module":  "tofu.ui",
 			"type":     "planned_change",
-			"change": map[string]interface{}{
+			"change": map[string]any{
 				"action": "create",
-				"resource": map[string]interface{}{
+				"resource": map[string]any{
 					"addr":             `test_resource.boop[1]`,
 					"implied_provider": "test",
 					"module":           "",
@@ -725,9 +695,9 @@ func TestOperationJSON_plan(t *testing.T) {
 			"@message": "module.vpc.test_resource.boop[0]: Plan to delete",
 			"@module":  "tofu.ui",
 			"type":     "planned_change",
-			"change": map[string]interface{}{
+			"change": map[string]any{
 				"action": "delete",
-				"resource": map[string]interface{}{
+				"resource": map[string]any{
 					"addr":             `module.vpc.test_resource.boop[0]`,
 					"implied_provider": "test",
 					"module":           "module.vpc",
@@ -744,9 +714,9 @@ func TestOperationJSON_plan(t *testing.T) {
 			"@message": "test_resource.beep: Plan to replace",
 			"@module":  "tofu.ui",
 			"type":     "planned_change",
-			"change": map[string]interface{}{
+			"change": map[string]any{
 				"action": "replace",
-				"resource": map[string]interface{}{
+				"resource": map[string]any{
 					"addr":             `test_resource.beep`,
 					"implied_provider": "test",
 					"module":           "",
@@ -763,9 +733,9 @@ func TestOperationJSON_plan(t *testing.T) {
 			"@message": "module.vpc.test_resource.beep: Plan to update",
 			"@module":  "tofu.ui",
 			"type":     "planned_change",
-			"change": map[string]interface{}{
+			"change": map[string]any{
 				"action": "update",
-				"resource": map[string]interface{}{
+				"resource": map[string]any{
 					"addr":             `module.vpc.test_resource.beep`,
 					"implied_provider": "test",
 					"module":           "module.vpc",
@@ -783,7 +753,7 @@ func TestOperationJSON_plan(t *testing.T) {
 			"@message": "Plan: 3 to add, 1 to change, 3 to destroy.",
 			"@module":  "tofu.ui",
 			"type":     "change_summary",
-			"changes": map[string]interface{}{
+			"changes": map[string]any{
 				"operation": "plan",
 				"add":       float64(3),
 				"import":    float64(0),
@@ -837,16 +807,16 @@ func TestOperationJSON_planWithImport(t *testing.T) {
 	}
 	v.Plan(plan, testSchemas())
 
-	want := []map[string]interface{}{
+	want := []map[string]any{
 		// Simple import
 		{
 			"@level":   "info",
 			"@message": "module.vpc.test_resource.boop[0]: Plan to import",
 			"@module":  "tofu.ui",
 			"type":     "planned_change",
-			"change": map[string]interface{}{
+			"change": map[string]any{
 				"action": "import",
-				"resource": map[string]interface{}{
+				"resource": map[string]any{
 					"addr":             `module.vpc.test_resource.boop[0]`,
 					"implied_provider": "test",
 					"module":           "module.vpc",
@@ -855,7 +825,7 @@ func TestOperationJSON_planWithImport(t *testing.T) {
 					"resource_name":    "boop",
 					"resource_type":    "test_resource",
 				},
-				"importing": map[string]interface{}{
+				"importing": map[string]any{
 					"id": "DECD6D77",
 				},
 			},
@@ -866,9 +836,9 @@ func TestOperationJSON_planWithImport(t *testing.T) {
 			"@message": "module.vpc.test_resource.boop[1]: Plan to delete",
 			"@module":  "tofu.ui",
 			"type":     "planned_change",
-			"change": map[string]interface{}{
+			"change": map[string]any{
 				"action": "delete",
-				"resource": map[string]interface{}{
+				"resource": map[string]any{
 					"addr":             `module.vpc.test_resource.boop[1]`,
 					"implied_provider": "test",
 					"module":           "module.vpc",
@@ -877,7 +847,7 @@ func TestOperationJSON_planWithImport(t *testing.T) {
 					"resource_name":    "boop",
 					"resource_type":    "test_resource",
 				},
-				"importing": map[string]interface{}{
+				"importing": map[string]any{
 					"id": "DECD6D77",
 				},
 			},
@@ -888,9 +858,9 @@ func TestOperationJSON_planWithImport(t *testing.T) {
 			"@message": "test_resource.boop[0]: Plan to replace",
 			"@module":  "tofu.ui",
 			"type":     "planned_change",
-			"change": map[string]interface{}{
+			"change": map[string]any{
 				"action": "replace",
-				"resource": map[string]interface{}{
+				"resource": map[string]any{
 					"addr":             `test_resource.boop[0]`,
 					"implied_provider": "test",
 					"module":           "",
@@ -899,7 +869,7 @@ func TestOperationJSON_planWithImport(t *testing.T) {
 					"resource_name":    "boop",
 					"resource_type":    "test_resource",
 				},
-				"importing": map[string]interface{}{
+				"importing": map[string]any{
 					"id": "DECD6D77",
 				},
 			},
@@ -910,9 +880,9 @@ func TestOperationJSON_planWithImport(t *testing.T) {
 			"@message": "test_resource.beep: Plan to update",
 			"@module":  "tofu.ui",
 			"type":     "planned_change",
-			"change": map[string]interface{}{
+			"change": map[string]any{
 				"action": "update",
-				"resource": map[string]interface{}{
+				"resource": map[string]any{
 					"addr":             `test_resource.beep`,
 					"implied_provider": "test",
 					"module":           "",
@@ -921,7 +891,7 @@ func TestOperationJSON_planWithImport(t *testing.T) {
 					"resource_name":    "beep",
 					"resource_type":    "test_resource",
 				},
-				"importing": map[string]interface{}{
+				"importing": map[string]any{
 					"id": "DECD6D77",
 				},
 			},
@@ -931,7 +901,7 @@ func TestOperationJSON_planWithImport(t *testing.T) {
 			"@message": "Plan: 4 to import, 1 to add, 1 to change, 2 to destroy.",
 			"@module":  "tofu.ui",
 			"type":     "change_summary",
-			"changes": map[string]interface{}{
+			"changes": map[string]any{
 				"operation": "plan",
 				"add":       float64(1),
 				"import":    float64(4),
@@ -987,16 +957,16 @@ func TestOperationJSON_planDriftWithMove(t *testing.T) {
 	}
 	v.Plan(plan, testSchemas())
 
-	want := []map[string]interface{}{
+	want := []map[string]any{
 		// Drift detected: delete
 		{
 			"@level":   "info",
 			"@message": "test_resource.beep: Drift detected (delete)",
 			"@module":  "tofu.ui",
 			"type":     "resource_drift",
-			"change": map[string]interface{}{
+			"change": map[string]any{
 				"action": "delete",
-				"resource": map[string]interface{}{
+				"resource": map[string]any{
 					"addr":             "test_resource.beep",
 					"implied_provider": "test",
 					"module":           "",
@@ -1013,9 +983,9 @@ func TestOperationJSON_planDriftWithMove(t *testing.T) {
 			"@message": "test_resource.boop: Drift detected (update)",
 			"@module":  "tofu.ui",
 			"type":     "resource_drift",
-			"change": map[string]interface{}{
+			"change": map[string]any{
 				"action": "update",
-				"resource": map[string]interface{}{
+				"resource": map[string]any{
 					"addr":             "test_resource.boop",
 					"implied_provider": "test",
 					"module":           "",
@@ -1024,7 +994,7 @@ func TestOperationJSON_planDriftWithMove(t *testing.T) {
 					"resource_name":    "boop",
 					"resource_type":    "test_resource",
 				},
-				"previous_resource": map[string]interface{}{
+				"previous_resource": map[string]any{
 					"addr":             "test_resource.blep",
 					"implied_provider": "test",
 					"module":           "",
@@ -1041,9 +1011,9 @@ func TestOperationJSON_planDriftWithMove(t *testing.T) {
 			"@message": `test_resource.honk["bonk"]: Plan to move`,
 			"@module":  "tofu.ui",
 			"type":     "planned_change",
-			"change": map[string]interface{}{
+			"change": map[string]any{
 				"action": "move",
-				"resource": map[string]interface{}{
+				"resource": map[string]any{
 					"addr":             `test_resource.honk["bonk"]`,
 					"implied_provider": "test",
 					"module":           "",
@@ -1052,7 +1022,7 @@ func TestOperationJSON_planDriftWithMove(t *testing.T) {
 					"resource_name":    "honk",
 					"resource_type":    "test_resource",
 				},
-				"previous_resource": map[string]interface{}{
+				"previous_resource": map[string]any{
 					"addr":             `test_resource.honk[0]`,
 					"implied_provider": "test",
 					"module":           "",
@@ -1069,7 +1039,7 @@ func TestOperationJSON_planDriftWithMove(t *testing.T) {
 			"@message": "Plan: 0 to add, 0 to change, 0 to destroy.",
 			"@module":  "tofu.ui",
 			"type":     "change_summary",
-			"changes": map[string]interface{}{
+			"changes": map[string]any{
 				"operation": "plan",
 				"add":       float64(0),
 				"import":    float64(0),
@@ -1119,16 +1089,16 @@ func TestOperationJSON_planDriftWithMoveRefreshOnly(t *testing.T) {
 	}
 	v.Plan(plan, testSchemas())
 
-	want := []map[string]interface{}{
+	want := []map[string]any{
 		// Drift detected: delete
 		{
 			"@level":   "info",
 			"@message": "test_resource.beep: Drift detected (delete)",
 			"@module":  "tofu.ui",
 			"type":     "resource_drift",
-			"change": map[string]interface{}{
+			"change": map[string]any{
 				"action": "delete",
-				"resource": map[string]interface{}{
+				"resource": map[string]any{
 					"addr":             "test_resource.beep",
 					"implied_provider": "test",
 					"module":           "",
@@ -1145,9 +1115,9 @@ func TestOperationJSON_planDriftWithMoveRefreshOnly(t *testing.T) {
 			"@message": "test_resource.boop: Drift detected (update)",
 			"@module":  "tofu.ui",
 			"type":     "resource_drift",
-			"change": map[string]interface{}{
+			"change": map[string]any{
 				"action": "update",
-				"resource": map[string]interface{}{
+				"resource": map[string]any{
 					"addr":             "test_resource.boop",
 					"implied_provider": "test",
 					"module":           "",
@@ -1156,7 +1126,7 @@ func TestOperationJSON_planDriftWithMoveRefreshOnly(t *testing.T) {
 					"resource_name":    "boop",
 					"resource_type":    "test_resource",
 				},
-				"previous_resource": map[string]interface{}{
+				"previous_resource": map[string]any{
 					"addr":             "test_resource.blep",
 					"implied_provider": "test",
 					"module":           "",
@@ -1173,9 +1143,9 @@ func TestOperationJSON_planDriftWithMoveRefreshOnly(t *testing.T) {
 			"@message": `test_resource.honk["bonk"]: Drift detected (move)`,
 			"@module":  "tofu.ui",
 			"type":     "resource_drift",
-			"change": map[string]interface{}{
+			"change": map[string]any{
 				"action": "move",
-				"resource": map[string]interface{}{
+				"resource": map[string]any{
 					"addr":             `test_resource.honk["bonk"]`,
 					"implied_provider": "test",
 					"module":           "",
@@ -1184,7 +1154,7 @@ func TestOperationJSON_planDriftWithMoveRefreshOnly(t *testing.T) {
 					"resource_name":    "honk",
 					"resource_type":    "test_resource",
 				},
-				"previous_resource": map[string]interface{}{
+				"previous_resource": map[string]any{
 					"addr":             `test_resource.honk[0]`,
 					"implied_provider": "test",
 					"module":           "",
@@ -1201,7 +1171,7 @@ func TestOperationJSON_planDriftWithMoveRefreshOnly(t *testing.T) {
 			"@message": "Plan: 0 to add, 0 to change, 0 to destroy.",
 			"@module":  "tofu.ui",
 			"type":     "change_summary",
-			"changes": map[string]interface{}{
+			"changes": map[string]any{
 				"operation": "plan",
 				"add":       float64(0),
 				"import":    float64(0),
@@ -1255,14 +1225,14 @@ func TestOperationJSON_planOutputChanges(t *testing.T) {
 	}
 	v.Plan(plan, testSchemas())
 
-	want := []map[string]interface{}{
+	want := []map[string]any{
 		// No resource changes
 		{
 			"@level":   "info",
 			"@message": "Plan: 0 to add, 0 to change, 0 to destroy.",
 			"@module":  "tofu.ui",
 			"type":     "change_summary",
-			"changes": map[string]interface{}{
+			"changes": map[string]any{
 				"operation": "plan",
 				"add":       float64(0),
 				"import":    float64(0),
@@ -1277,20 +1247,20 @@ func TestOperationJSON_planOutputChanges(t *testing.T) {
 			"@message": "Outputs: 4",
 			"@module":  "tofu.ui",
 			"type":     "outputs",
-			"outputs": map[string]interface{}{
-				"boop": map[string]interface{}{
+			"outputs": map[string]any{
+				"boop": map[string]any{
 					"action":    "noop",
 					"sensitive": false,
 				},
-				"beep": map[string]interface{}{
+				"beep": map[string]any{
 					"action":    "create",
 					"sensitive": false,
 				},
-				"bonk": map[string]interface{}{
+				"bonk": map[string]any{
 					"action":    "delete",
 					"sensitive": false,
 				},
-				"honk": map[string]interface{}{
+				"honk": map[string]any{
 					"action":    "update",
 					"sensitive": true,
 				},
@@ -1332,16 +1302,16 @@ func TestOperationJSON_plannedChange(t *testing.T) {
 	})
 
 	// Expect only two messages, as the data source deletion should be a no-op
-	want := []map[string]interface{}{
+	want := []map[string]any{
 		{
 			"@level":   "info",
 			"@message": "test_instance.boop[0]: Plan to replace",
 			"@module":  "tofu.ui",
 			"type":     "planned_change",
-			"change": map[string]interface{}{
+			"change": map[string]any{
 				"action": "replace",
 				"reason": "requested",
-				"resource": map[string]interface{}{
+				"resource": map[string]any{
 					"addr":             `test_instance.boop[0]`,
 					"implied_provider": "test",
 					"module":           "",
@@ -1357,9 +1327,9 @@ func TestOperationJSON_plannedChange(t *testing.T) {
 			"@message": "test_instance.boop[1]: Plan to create",
 			"@module":  "tofu.ui",
 			"type":     "planned_change",
-			"change": map[string]interface{}{
+			"change": map[string]any{
 				"action": "create",
-				"resource": map[string]interface{}{
+				"resource": map[string]any{
 					"addr":             `test_instance.boop[1]`,
 					"implied_provider": "test",
 					"module":           "",

@@ -44,6 +44,11 @@ func TestMain(m *testing.M) {
 	// abstractions.
 	spew.Config.DisableMethods = true
 
+	// TEMP: If the appropriate environment variable is set then we'll apply this
+	// package's tests to the experimental new language runtime instead, through
+	// some shims. Refer to this function's documentation for more information.
+	maybeRunExperimentalNewRuntimeTests(m)
+
 	os.Exit(m.Run())
 }
 
@@ -57,10 +62,8 @@ func testModuleWithSnapshot(t testing.TB, name string) (*configs.Config, *config
 	t.Helper()
 
 	dir := filepath.Join(fixtureDir, name)
-	loader := configload.NewLoaderForTests(t)
-
 	// We need to be able to exercise experimental features in our integration tests.
-	loader.AllowLanguageExperiments(true)
+	loader := configload.NewLoaderForTests(t, true)
 
 	// Test modules usually do not refer to remote sources, and for local
 	// sources only this ultimately just records all of the module paths
@@ -113,10 +116,8 @@ func testModuleInline(t testing.TB, sources map[string]string) *configs.Config {
 		}
 	}
 
-	loader := configload.NewLoaderForTests(t)
-
 	// We need to be able to exercise experimental features in our integration tests.
-	loader.AllowLanguageExperiments(true)
+	loader := configload.NewLoaderForTests(t, true)
 
 	// Test modules usually do not refer to remote sources, and for local
 	// sources only this ultimately just records all of the module paths
@@ -248,6 +249,25 @@ func mustReference(s string) *addrs.Reference {
 		panic(diags.Err())
 	}
 	return p
+}
+
+// assertNoPanic runs the given function and returns whatever it returns, or
+// halts the test with an error if the function panics on the main goroutine
+// during execution.
+//
+// This is generic to support any function that returns two results regardless
+// of type, though it's mainly intended for functions where the second return
+// value is either error or diagnostics.
+//
+// Note that this does not catch panics on any other goroutine that might be
+// created during the function's execution.
+func assertNoPanic[R, E any](t testing.TB, f func() (R, E)) (R, E) {
+	defer func() {
+		if pe := recover(); pe != nil {
+			t.Fatalf("unexpected panic: %#v", pe)
+		}
+	}()
+	return f()
 }
 
 // HookRecordApplyOrder is a test hook that records the order of applies

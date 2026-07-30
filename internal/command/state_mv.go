@@ -11,8 +11,6 @@ import (
 	"strings"
 
 	"github.com/mitchellh/cli"
-	"github.com/opentofu/opentofu/internal/command/flags"
-
 	"github.com/opentofu/opentofu/internal/addrs"
 	"github.com/opentofu/opentofu/internal/backend"
 	"github.com/opentofu/opentofu/internal/command/arguments"
@@ -37,12 +35,6 @@ func (c *StateMvCommand) Run(rawArgs []string) int {
 	// in order to keep functional parity, we setup the view to add a new line after each diagnostic.
 	c.View.DiagsWithNewline()
 
-	// Propagate -no-color for legacy use of Ui. The remote backend and
-	// cloud package use this; it should be removed when/if they are
-	// migrated to views.
-	c.Meta.color = !common.NoColor
-	c.Meta.Color = c.Meta.color
-
 	// Parse and validate flags
 	args, closer, diags := arguments.ParseStateMv(rawArgs)
 	defer closer()
@@ -50,22 +42,27 @@ func (c *StateMvCommand) Run(rawArgs []string) int {
 	// Instantiate the view, even if there are flag errors, so that we render
 	// diagnostics according to the desired view
 	view := views.NewState(args.ViewOptions, c.View)
-	// ... and initialise the Meta.Ui to wrap Meta.View into a new implementation
-	// that is able to print by using View abstraction and use the Meta.Ui
-	// to ask for the user input.
-	c.Meta.configureUiFromView(args.ViewOptions)
 	if diags.HasErrors() {
 		view.Diagnostics(diags)
+		if args.ViewOptions.ViewType == arguments.ViewJSON {
+			return 1 // in case it's json, do not print the help of the command
+		}
 		return cli.RunResultHelp
 	}
-	// TODO meta-refactor: remove these assignments once there is a clear way to propagate these to the place
-	//   where are used
-	c.backupPath = args.BackupPath
-	c.statePath = args.StatePath
-	c.stateLock = args.Backend.StateLock
-	c.stateLockTimeout = args.Backend.StateLockTimeout
-	c.ignoreRemoteVersion = args.Backend.IgnoreRemoteVersion
-	c.GatherVariables(args.Vars)
+	c.backendArgs = *args.Backend
+
+	c.Meta.variableArgs = args.Vars.All()
+	// NOTE: We intentionally configure the stateArgs here like this, ignoring the stateOutPath, because the c.stateArgs
+	// are used for loading the state which stores internally the output path which in the context of this command
+	// will have unwanted side effects, ending in writing the source state in the target state.
+	// TODO meta-refactor: when we move the backend logic to its own component, maybe there is a way to change the
+	//  arguments.State in such way to be reused with/without the stateOut.
+	c.Meta.stateArgs = arguments.State{
+		Lock:        args.State.Lock,
+		LockTimeout: args.State.LockTimeout,
+		StatePath:   args.State.StatePath,
+		BackupPath:  args.State.BackupPath,
+	}
 
 	if diags := c.Meta.checkRequiredVersion(ctx); diags != nil {
 		view.Diagnostics(diags)
@@ -75,8 +72,8 @@ func (c *StateMvCommand) Run(rawArgs []string) int {
 	// If backup or backup-out options are set
 	// and the state option is not set, make sure
 	// the backend is local
-	backupOptionSetWithoutStateOption := args.BackupPath != "-" && args.StatePath == ""
-	backupOutOptionSetWithoutStateOption := args.BackupPathOut != "-" && args.StatePath == ""
+	backupOptionSetWithoutStateOption := args.State.BackupPath != "-" && args.State.StatePath == ""
+	backupOutOptionSetWithoutStateOption := args.BackupPathOut != "-" && args.State.StatePath == ""
 
 	var setLegacyLocalBackendOptions []string
 	if backupOptionSetWithoutStateOption {
@@ -94,7 +91,7 @@ func (c *StateMvCommand) Run(rawArgs []string) int {
 	}
 
 	if len(setLegacyLocalBackendOptions) > 0 {
-		currentBackend, diags := c.backendFromConfig(ctx, &BackendOpts{}, enc.State())
+		currentBackend, diags := c.backendFromConfig(ctx, &BackendOpts{View: view.Backend()}, enc.State())
 		if diags.HasErrors() {
 			view.Diagnostics(diags)
 			return 1
@@ -117,14 +114,14 @@ func (c *StateMvCommand) Run(rawArgs []string) int {
 	}
 
 	// Read the from state
-	stateFromMgr, err := c.State(ctx, enc)
+	stateFromMgr, err := c.State(ctx, enc, view)
 	if err != nil {
 		view.StateLoadingFailure(err.Error())
 		return 1
 	}
 
-	if c.stateLock {
-		stateLocker := clistate.NewLocker(c.stateLockTimeout, views.NewStateLocker(args.ViewOptions, c.View))
+	if c.stateArgs.Lock {
+		stateLocker := clistate.NewLocker(c.stateArgs.LockTimeout, view.Backend().StateLocker())
 		if diags := stateLocker.Lock(stateFromMgr, "state-mv"); diags.HasErrors() {
 			view.Diagnostics(diags)
 			return 1
@@ -137,7 +134,11 @@ func (c *StateMvCommand) Run(rawArgs []string) int {
 	}
 
 	if err := stateFromMgr.RefreshState(context.TODO()); err != nil {
-		view.Diagnostics(diags.Append(fmt.Errorf("Failed to refresh source state: %s", err)))
+		view.Diagnostics(diags.Append(tfdiags.Sourceless(
+			tfdiags.Error,
+			"Failed to refresh source state",
+			err.Error(),
+		)))
 		return 1
 	}
 
@@ -151,18 +152,18 @@ func (c *StateMvCommand) Run(rawArgs []string) int {
 	stateToMgr := stateFromMgr
 	stateTo := stateFrom
 
-	if args.StateOutPath != "" {
-		c.statePath = args.StateOutPath
-		c.backupPath = args.BackupPathOut
+	if args.State.StateOutPath != "" {
+		c.stateArgs.StatePath = args.State.StateOutPath
+		c.stateArgs.BackupPath = args.BackupPathOut
 
-		stateToMgr, err = c.State(ctx, enc)
+		stateToMgr, err = c.State(ctx, enc, view)
 		if err != nil {
 			view.StateLoadingFailure(err.Error())
 			return 1
 		}
 
-		if c.stateLock {
-			stateLocker := clistate.NewLocker(c.stateLockTimeout, views.NewStateLocker(args.ViewOptions, c.View))
+		if c.stateArgs.Lock {
+			stateLocker := clistate.NewLocker(c.stateArgs.LockTimeout, view.Backend().StateLocker())
 			if diags := stateLocker.Lock(stateToMgr, "state-mv"); diags.HasErrors() {
 				view.Diagnostics(diags)
 				return 1
@@ -175,7 +176,11 @@ func (c *StateMvCommand) Run(rawArgs []string) int {
 		}
 
 		if err := stateToMgr.RefreshState(context.TODO()); err != nil {
-			view.Diagnostics(diags.Append(fmt.Errorf("Failed to refresh destination state: %s", err)))
+			view.Diagnostics(diags.Append(tfdiags.Sourceless(
+				tfdiags.Error,
+				"Failed to refresh destination state",
+				err.Error(),
+			)))
 			return 1
 		}
 
@@ -603,22 +608,4 @@ Options:
 
 func (c *StateMvCommand) Synopsis() string {
 	return "Move an item in the state"
-}
-
-// TODO meta-refactor: move this to arguments once all commands are using the same shim logic
-func (c *StateMvCommand) GatherVariables(args *arguments.Vars) {
-	// FIXME the arguments package currently trivially gathers variable related
-	// arguments in a heterogeneous slice, in order to minimize the number of
-	// code paths gathering variables during the transition to this structure.
-	// Once all commands that gather variables have been converted to this
-	// structure, we could move the variable gathering code to the arguments
-	// package directly, removing this shim layer.
-
-	varArgs := args.All()
-	items := make([]flags.RawFlag, len(varArgs))
-	for i := range varArgs {
-		items[i].Name = varArgs[i].Name
-		items[i].Value = varArgs[i].Value
-	}
-	c.Meta.variableArgs = flags.RawFlags{Items: &items}
 }

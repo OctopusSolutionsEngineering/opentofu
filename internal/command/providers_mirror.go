@@ -8,15 +8,17 @@ package command
 import (
 	"encoding/json"
 	"fmt"
+	"iter"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/apparentlymart/go-versions/versions"
 	"github.com/hashicorp/go-getter"
 	"github.com/mitchellh/cli"
+	"github.com/opentofu/opentofu/internal/addrs"
 	"github.com/opentofu/opentofu/internal/command/arguments"
-	"github.com/opentofu/opentofu/internal/command/flags"
 	"github.com/opentofu/opentofu/internal/command/views"
 
 	"github.com/opentofu/opentofu/internal/getproviders"
@@ -44,12 +46,6 @@ func (c *ProvidersMirrorCommand) Run(rawArgs []string) int {
 	// in order to keep functional parity, we setup the view to add a new line after each diagnostic.
 	c.View.DiagsWithNewline()
 
-	// Propagate -no-color for legacy use of Ui. The remote backend and
-	// cloud package use this; it should be removed when/if they are
-	// migrated to views.
-	c.Meta.color = !common.NoColor
-	c.Meta.Color = c.Meta.color
-
 	// Parse and validate flags
 	args, closer, diags := arguments.ParseProvidersMirror(rawArgs)
 	defer closer()
@@ -57,11 +53,6 @@ func (c *ProvidersMirrorCommand) Run(rawArgs []string) int {
 	// Instantiate the view, even if there are flag errors, so that we render
 	// diagnostics according to the desired view
 	view := views.NewProvidersMirror(args.ViewOptions, c.View)
-	// ... and initialise the Meta.Ui to wrap Meta.View into a new implementation
-	// that is able to print by using View abstraction and use the Meta.Ui
-	// to ask for the user input.
-	c.Meta.configureUiFromView(args.ViewOptions)
-
 	if diags.HasErrors() {
 		view.Diagnostics(diags)
 		if args.ViewOptions.ViewType == arguments.ViewJSON {
@@ -69,7 +60,7 @@ func (c *ProvidersMirrorCommand) Run(rawArgs []string) int {
 		}
 		return cli.RunResultHelp
 	}
-	c.GatherVariables(args.Vars)
+	c.Meta.variableArgs = args.Vars.All()
 
 	outputDir := args.Directory
 
@@ -154,6 +145,8 @@ func (c *ProvidersMirrorCommand) Run(rawArgs []string) int {
 	//   infrequently to update a mirror, so it doesn't need to optimize away
 	//   fetches of packages that might already be present.
 
+	computedHashes := map[addrs.Provider]map[getproviders.Platform]iter.Seq[getproviders.Hash]{}
+
 	for provider, constraints := range reqs {
 		if provider.IsBuiltIn() {
 			view.ProviderSkipped(provider.ForDisplay())
@@ -194,6 +187,7 @@ func (c *ProvidersMirrorCommand) Run(rawArgs []string) int {
 		} else {
 			view.ProviderVersionSelectedWithNoConstraints(provider.ForDisplay(), selected.String())
 		}
+		computedHashes[provider] = map[getproviders.Platform]iter.Seq[getproviders.Hash]{}
 		for _, platform := range platforms {
 			view.DownloadingPackageFor(provider.ForDisplay(), selected.String(), platform.String())
 			meta, err := source.PackageMeta(ctx, provider, selected, platform)
@@ -255,6 +249,12 @@ func (c *ProvidersMirrorCommand) Run(rawArgs []string) int {
 					))
 					continue
 				}
+				computedHashes[provider][platform] = result.HashesWithDisposition(func(d *getproviders.HashDisposition) bool {
+					// We include ReportedByTrustedMirror in the slim chance
+					// that someone has a multi stage mirror chain.
+					isTrusted := d.VerifiedLocally || d.ReportedByRegistry || d.ReportedByTrustedMirror
+					return isTrusted && d.Platform != nil && *d.Platform == platform
+				})
 				view.PackageAuthenticated(provider.ForDisplay(), selected.String(), platform.String(), result.String())
 			}
 			os.Remove(targetPath) // okay if it fails because we're going to try to rename over it next anyway
@@ -307,22 +307,34 @@ func (c *ProvidersMirrorCommand) Run(rawArgs []string) int {
 			archiveFilename := filepath.Base(string(archivePath))
 			version := meta.Version
 			platform := meta.TargetPlatform
-			hash, err := meta.Hash()
-			if err != nil {
-				diags = diags.Append(tfdiags.Sourceless(
-					tfdiags.Error,
-					"Failed to update indexes",
-					fmt.Sprintf("Failed to determine a hash value for %s v%s on %s: %s.", provider, version, platform, err),
-				))
-				continue
+			var hashes []string
+			computed, ok := computedHashes[provider][platform]
+			if ok && computed != nil {
+				for hash := range computed {
+					hashes = append(hashes, hash.String())
+				}
 			}
+			if len(hashes) == 0 {
+				// Fallback
+				hash, err := meta.Hash()
+				if err != nil {
+					diags = diags.Append(tfdiags.Sourceless(
+						tfdiags.Error,
+						"Failed to update indexes",
+						fmt.Sprintf("Failed to determine a hash value for %s v%s on %s: %s.", provider, version, platform, err),
+					))
+					continue
+				}
+				hashes = append(hashes, hash.String())
+			}
+			slices.Sort(hashes)
 			indexVersions[meta.Version.String()] = map[string]interface{}{}
 			if _, ok := indexArchives[version]; !ok {
 				indexArchives[version] = map[string]interface{}{}
 			}
 			indexArchives[version][platform.String()] = map[string]interface{}{
-				"url":    archiveFilename,         // a relative URL from the index file's URL
-				"hashes": []string{hash.String()}, // an array to allow for additional hash formats in future
+				"url":    archiveFilename, // a relative URL from the index file's URL
+				"hashes": hashes,          // an array to allow for additional hash formats in future
 			}
 		}
 		mainIndex := map[string]interface{}{
@@ -423,22 +435,4 @@ Options:
                       the original human-readable output streams, while
                       capturing more detailed logs for machine analysis.
 `
-}
-
-// TODO meta-refactor: move this to arguments once all commands are using the same shim logic
-func (c *ProvidersMirrorCommand) GatherVariables(args *arguments.Vars) {
-	// FIXME the arguments package currently trivially gathers variable related
-	// arguments in a heterogeneous slice, in order to minimize the number of
-	// code paths gathering variables during the transition to this structure.
-	// Once all commands that gather variables have been converted to this
-	// structure, we could move the variable gathering code to the arguments
-	// package directly, removing this shim layer.
-
-	varArgs := args.All()
-	items := make([]flags.RawFlag, len(varArgs))
-	for i := range varArgs {
-		items[i].Name = varArgs[i].Name
-		items[i].Value = varArgs[i].Value
-	}
-	c.Meta.variableArgs = flags.RawFlags{Items: &items}
 }

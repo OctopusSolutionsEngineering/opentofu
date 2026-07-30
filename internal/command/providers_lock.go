@@ -6,6 +6,7 @@
 package command
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 	"os"
@@ -13,14 +14,16 @@ import (
 	"github.com/mitchellh/cli"
 	"github.com/opentofu/opentofu/internal/addrs"
 	"github.com/opentofu/opentofu/internal/command/arguments"
-	"github.com/opentofu/opentofu/internal/command/flags"
+	"github.com/opentofu/opentofu/internal/command/cliconfig/ociauthconfig"
 	"github.com/opentofu/opentofu/internal/command/views"
 	"github.com/opentofu/opentofu/internal/depsfile"
 	"github.com/opentofu/opentofu/internal/getproviders"
+	"github.com/opentofu/opentofu/internal/oci"
 	"github.com/opentofu/opentofu/internal/providercache"
 	"github.com/opentofu/opentofu/internal/tfdiags"
 	"github.com/opentofu/opentofu/internal/tracing"
 	"github.com/opentofu/opentofu/internal/tracing/traceattrs"
+	"github.com/opentofu/svchost/uritemplates"
 )
 
 type providersLockChangeType string
@@ -56,12 +59,6 @@ func (c *ProvidersLockCommand) Run(rawArgs []string) int {
 	// in order to keep functional parity, we setup the view to add a new line after each diagnostic.
 	c.View.DiagsWithNewline()
 
-	// Propagate -no-color for legacy use of Ui. The remote backend and
-	// cloud package use this; it should be removed when/if they are
-	// migrated to views.
-	c.Meta.color = !common.NoColor
-	c.Meta.Color = c.Meta.color
-
 	// Parse and validate flags
 	args, closer, diags := arguments.ParseProvidersLock(rawArgs)
 	defer closer()
@@ -69,11 +66,6 @@ func (c *ProvidersLockCommand) Run(rawArgs []string) int {
 	// Instantiate the view, even if there are flag errors, so that we render
 	// diagnostics according to the desired view
 	view := views.NewProvidersLock(args.ViewOptions, c.View)
-	// ... and initialise the Meta.Ui to wrap Meta.View into a new implementation
-	// that is able to print by using View abstraction and use the Meta.Ui
-	// to ask for the user input.
-	c.Meta.configureUiFromView(args.ViewOptions)
-
 	if diags.HasErrors() {
 		view.Diagnostics(diags)
 		if args.ViewOptions.ViewType == arguments.ViewJSON {
@@ -81,7 +73,7 @@ func (c *ProvidersLockCommand) Run(rawArgs []string) int {
 		}
 		return cli.RunResultHelp
 	}
-	c.GatherVariables(args.Vars)
+	c.Meta.variableArgs = args.Vars.All()
 
 	span.SetAttributes(traceattrs.StringSlice("opentofu.provider.lock.targetplatforms", args.OptPlatforms))
 	if args.FsMirrorDir != "" {
@@ -89,6 +81,9 @@ func (c *ProvidersLockCommand) Run(rawArgs []string) int {
 	}
 	if args.NetMirrorURL != "" {
 		span.SetAttributes(traceattrs.String("opentofu.provider.lock.netmirror", args.NetMirrorURL))
+	}
+	if args.OciMirrorTemplate != "" {
+		span.SetAttributes(traceattrs.String("opentofu.provider.lock.ocimirror", args.OciMirrorTemplate))
 	}
 
 	providerStrs := args.Providers
@@ -149,6 +144,30 @@ func (c *ProvidersLockCommand) Run(rawArgs []string) int {
 		// don't use this client directly.
 		httpTimeout := c.registryHTTPClient(ctx).HTTPClient.Timeout
 		source = getproviders.NewHTTPMirrorSource(ctx, u, c.Services.CredentialsSource(), httpTimeout, c.ProviderSourceLocationConfig)
+	case args.OciMirrorTemplate != "":
+		source = getproviders.NewOCIRegistryMirrorSource(
+			ctx,
+			func(addr addrs.Provider) (registryDomain string, repositoryName string, err error) {
+				uri, err := uritemplates.ExpandLevel1(args.OciMirrorTemplate, map[string]string{
+					"hostname":  addr.Hostname.String(),
+					"namespace": addr.Namespace,
+					"type":      addr.Type,
+				})
+				if err != nil {
+					return "", "", fmt.Errorf("error while expanding uri template: %w", err)
+				}
+
+				return ociauthconfig.ParseRepositoryAddressPrefix(uri)
+			},
+			func(ctx context.Context, registryDomain, repositoryName string) (getproviders.OCIRepositoryStore, error) {
+				credsPolicy, err := c.OCICredentialsPolicyBuilder(ctx)
+				if err != nil {
+					// This deals with only a small number of errors that we can't catch during CLI config validation
+					return nil, fmt.Errorf("invalid credentials configuration for OCI registries: %w", err)
+				}
+				return oci.GetOCIRepositoryStore(ctx, registryDomain, repositoryName, credsPolicy)
+			},
+		)
 	default:
 		// With no special options we consult upstream registries directly,
 		// because that gives us the most information to produce as complete
@@ -365,24 +384,6 @@ func (c *ProvidersLockCommand) Run(rawArgs []string) int {
 	return 0
 }
 
-// TODO meta-refactor: move this to arguments once all commands are using the same shim logic
-func (c *ProvidersLockCommand) GatherVariables(args *arguments.Vars) {
-	// FIXME the arguments package currently trivially gathers variable related
-	// arguments in a heterogeneous slice, in order to minimize the number of
-	// code paths gathering variables during the transition to this structure.
-	// Once all commands that gather variables have been converted to this
-	// structure, we could move the variable gathering code to the arguments
-	// package directly, removing this shim layer.
-
-	varArgs := args.All()
-	items := make([]flags.RawFlag, len(varArgs))
-	for i := range varArgs {
-		items[i].Name = varArgs[i].Name
-		items[i].Value = varArgs[i].Value
-	}
-	c.Meta.variableArgs = flags.RawFlags{Items: &items}
-}
-
 func (c *ProvidersLockCommand) Help() string {
 	return `
 Usage: tofu [global options] providers lock [options] [providers...]
@@ -426,6 +427,19 @@ Options:
                      of valid checksums will be limited only to what OpenTofu
                      can learn from the data in the mirror indices.
 
+  -oci-mirror=tmpl   Consult the given OCI registry mirror (given as a template)
+					 instead of the origin registry for each of the given
+					 providers.
+
+                     This would be necessary to generate lock file entries for
+                     a provider that is available only via an OCI mirror, and
+                     not published in an upstream registry.
+
+					 The argument is a Level 1 URI template as defined by RFC 6570,
+					 used to map provider source addresses to OCI repository
+					 addresses. The template can contain {hostname} {namespace}
+					 and {type}.
+
   -platform=os_arch  Choose a target platform to request package checksums
                      for.
 
@@ -449,8 +463,8 @@ Options:
                      Use this option more than once to include more than one
                      variables file.
 
-  -json               Produce output in a machine-readable JSON format, 
-                      suitable for use in text editor integrations and other 
+  -json               Produce output in a machine-readable JSON format,
+                      suitable for use in text editor integrations and other
                       automated systems. Always disables color.
 
   -json-into=out.json Produce the same output as -json, but sent directly

@@ -116,7 +116,7 @@ func (m *Meta) providerCustomLocalDirectorySource(ctx context.Context, dirs []st
 // Only one object returned from this method should be live at any time,
 // because objects inside contain caches that must be maintained properly.
 func (m *Meta) providerGlobalCacheDir() *providercache.Dir {
-	dir := m.PluginCacheDir
+	dir := m.SystemCfg.PluginCacheDir
 	if dir == "" {
 		return nil // cache disabled
 	}
@@ -307,6 +307,11 @@ func (m *Meta) providerFactories() (map[addrs.Provider]providers.Factory, error)
 		checkedProvider := false
 		var checkErr error
 
+		// This should only ever be called once per provider type.
+		// It creates the schema cache to be re-used in all of the subsequent
+		// provider instances.
+		factory := providerFactory(cached)
+
 		factories[provider] = func() (providers.Interface, error) {
 			checkLock.Lock()
 			if !checkedProvider {
@@ -319,7 +324,7 @@ func (m *Meta) providerFactories() (map[addrs.Provider]providers.Factory, error)
 				return nil, checkErr
 			}
 
-			return providerFactory(cached)()
+			return factory()
 		}
 	}
 	for provider, localDir := range devOverrideProviders {
@@ -391,7 +396,7 @@ func providerFactory(meta *providercache.CachedProvider) providers.Factory {
 
 // initializeProviderInstance uses the plugin dispensed by the RPC client, and initializes a plugin instance
 // per the protocol version
-func initializeProviderInstance(plugin interface{}, protoVer int, pluginClient *plugin.Client, schemaCache providers.SchemaCache) (providers.Interface, error) {
+func initializeProviderInstance(plugin any, protoVer int, pluginClient *plugin.Client, schemaCache providers.SchemaCache) (providers.Interface, error) {
 	// store the client so that the plugin can kill the child process
 	switch protoVer {
 	case 5:

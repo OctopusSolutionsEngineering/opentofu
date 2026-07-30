@@ -3,15 +3,15 @@
 > [!WARNING]
 > This manual is intended for OpenTofu core and fork maintainers. If you are looking for the normal contribution guide, see [this file](CONTRIBUTING.md).
 
-This manual describes how to create an OpenTofu release. OpenTofu has two kinds of releases. Alpha and Beta releases are created
-from the `main` branch, while we split off a version (e.g. `v1.8`) branch before creating an `rc` or `stable`
+This manual describes how to create an OpenTofu release. OpenTofu has two kinds of releases. Nightly releases are created
+from the `main` branch, while we split off a version (e.g. `v1.8`) branch before creating a 'beta', `rc` or `stable`
 release.
 
 --- 
 
 ## Naming in this document
 
-- **Alpha** is an early preview release. This is versioned `X.Y.0-alphaW`, where `X`,`Y` and `W` are numbers, such as `1.2.0-alpha1`.
+- **Nightly** is a unstable preview of the code as it sits on main.  It is built once per day and is versioned as `X.Y.0-dev`, where `X` and `Y` are numbers, such as `1.2.0-dev`. 
 - **Beta** is a semi-stable preview release. This is versioned `X.Y.0-betaW`, where `X`,`Y` and `W` are numbers, such as `1.2.0-beta1`.
 - **RC** is a release candidate which does not have new features over a beta. This is versioned `X.Y.0-rcW`, where `X`,`Y` and `W` are numbers, such as `1.2.0-rc1`.
 - **Stable** is a release that has no new features and bug fixes over an RC. This is versioned `X.Y.0`, where `X` and `Y` are numbers, such as `1.2.0`.
@@ -37,19 +37,6 @@ To create a release, make sure you have people on standby with the following cre
 ## Preparing public relations collaterals for a release
 
 Before you start creating a release, make sure you have the following marketing collaterals ready to be published:
-
-<details><summary>
-
-### Alpha version (`X.Y.0-alphaW`)
-
-</summary>
-
-- Feature Preview video for upcoming flagship features (see https://www.youtube.com/@opentofu for examples)
-- "Help us test..." blog post (see https://opentofu.org/blog/ for examples)
-- Community Slack announcement
-- Linkedin and X posts
-
-</details>
 
 <details><summary>
 
@@ -109,13 +96,30 @@ Ideally, make sure these changes go in as the last PR before the release.
 
 ---
 
+## Double check proper traceability of the included changes
+
+For better traceability, backported changes should link one of the following:
+* the link to the PR that added the change in the `main` branch
+* the link to the issue that the change fixes
+
+Ideally, all the backports should be done through backporting PRs, whose description should include one (or both) of the links above.
+
+If the backport is done through pushing directly to the targeted version branch, the commit message should include one (or both) of the links above.
+
+> [!WARNING]
+Right before issuing the release, ensure that all of the included changes follow the rules above.
+If not, a comment should be added, to either the PR or the issue, with the commit that actually backported the change.
+>
+> By doing so, it will help with the forward tracing (ie: from the issue to the commit) but will not provide back tracing (from the commit back to the issue).
+Therefore, this is a last resort, in cases where neither of the recommended options above cannot be done anymore (aka it might require rebasing on a branch where it is not allowed).
+
+
 ## Tagging the release
 
 Now that you have the files up to date, do the following:
 
 1. On your computer, make sure you have checked out the correct branch:
-   * `main` for `alpha` and `beta` releases
-   * `vX.Y` for any other releases (assuming you are releasing version `X.Y.Z`)
+   * `vX.Y`, assuming you are releasing version `X.Y.Z`
 2. Make sure the branch is up-to-date by running `git pull`
 3. Create the correct tag: `git tag -m "X.Y.Z" vX.Y.Z` (assuming you are releasing version `X.Y.Z`)
    * If you have a GPG key, consider adding the `-s` option to create a GPG-signed tag
@@ -131,11 +135,11 @@ Now comes the big step, creating the actual release.
 2. Select the `release` workflow on the left side
 3. Click the `Run workflow` button, which opens a popup menu
 4. Select the correct branch:
-   * For `alpha` releases, select the `main` branch
+   * For `beta` releases, select the `main` branch
    * For all other releases, select the appropriate version branch
 5. Enter the correct git tag name: `vX.Y.Z`
 6. If you are releasing the latest `X.Y` version, check the `Release as latest?` option.
-7. If you are releasing an `alpha`, `beta` or `rc` version, check the `Release as prerelease?` option.
+7. If you are releasing a `beta` or `rc` version, check the `Release as prerelease?` option.
 8. Click the `Run workflow` button.
 
 Now the release process will commence and create a *draft* release on GitHub. If you did not check the prerelease option, it will also publish to Snapcraft and PackageCloud.
@@ -147,14 +151,14 @@ Now the release process will commence and create a *draft* release on GitHub. If
 The release process takes about 30 minutes. When it is complete, head over to the [Releases section](https://github.com/opentofu/opentofu/releases) of the main repository and find the new draft release. Change the following settings
 
 - Edit the text (see the examples below).
-- Check `Set as a pre-release` if you are releasing an alpha, beta, or release candidate.
+- Check `Set as a pre-release` if you are releasing a beta or release candidate.
 - Check `Set as the latest release` if you are releasing a stable or point release for the latest major version. Do not check this checkbox if you are releasing a point release for an older major version.
 - Check `Create a discussion for this release` if you are releasing a stable (`X.Y.0`) version.
 - Click `Publish release`
 
 <details><summary>
 
-### Alpha, beta, or release candidate
+### Beta, or release candidate
 
 </summary>
 
@@ -222,9 +226,22 @@ For point releases, simply copy the section from the [CHANGELOG.md](CHANGELOG.md
 
 ---
 
-## Updating `get.opentofu.org`
+## Redeploying get.opentofu.org
 
-In order for the installer script to work, you will need to update the https://get.opentofu.org/tofu/api.json file. You can do this by logging in to Cloudflare and go to the [`opentofu-get` project in Cloudflare Pages](https://dash.cloudflare.com/84161f72ecc1f0274ab2fa7241f64249/pages/view/opentofu-get). Here click the three dots on the latest production deployment and click `Retry deployment`.
+After the release is published, `get.opentofu.org` needs to be redeployed so that the
+installer picks up the new version.
+
+> [!IMPORTANT]
+> This step must be done **after** clicking `Publish release` above. It does not happen
+> automatically: releases are created as drafts by `github-actions[bot]`, so the
+> `release` event does not reliably trigger the redeploy workflow on its own.
+
+1. Head to the [Actions tab](https://github.com/opentofu/opentofu/actions) on the main repository.
+2. Select the `Post-release` workflow on the left side.
+3. Click the `Run workflow` button and run it against the `main` branch.
+
+This invokes the Cloudflare deploy hook that redeploys `get.opentofu.org`. You no longer
+need to log into Cloudflare manually for this step.
 
 ---
 
@@ -245,16 +262,11 @@ git submodule update
 <details>
 <summary>
 
-## Updating govulncheck github workflow (only for stable releases)
-In [.github/workflows/govulncheck.yml](.github/workflows/govulncheck.yml), there is a matrix with the actively
-maintained versions of OpenTofu.
-When the new branch for the stable version is created, update the matrix above by adding the new branch and removing the deprecated version.
-
-### Alpha (`X.Y.Z-alphaW`), Beta (`X.Y.Z-betaW`) and Release Candidate (`X.Y.Z-rcW`)
+### Beta (`X.Y.Z-betaW`) and Release Candidate (`X.Y.Z-rcW`)
 
 </summary>
 
-We do not release documentation for non-stable releases. There is no action needed beyond publishing the blog post.
+We do not release documentation for non-stable releases, any links should point at the development/main version in our documentation. There is no action needed beyond publishing the blog post.
 
 </details>
 
@@ -291,12 +303,11 @@ We do not release documentation for non-stable releases. There is no action need
      path: "",
    },
    ```
-5. After this is set, change the `lastVersion` option to point to your version.
-6. Now locate any version that is no longer supported and remove the following line to add a deprecation warning:
+5. Now locate any version that is no longer supported and remove the following line to add a deprecation warning:
    ```
      banner: "none",
    ```
-7. Finally, locate the `navbar` option and `Docs` dropdown to reflect the new version list. It should look something like this:
+6. Locate the `navbar` option and `Docs` dropdown to reflect the new version list. It should look something like this:
    ```
    items: [
       {
@@ -313,6 +324,17 @@ We do not release documentation for non-stable releases. There is no action need
         href: "/docs/main/"
       },
     ],
+   ```
+7. Add the necessary entries in the `versioned_sidebars` and `versioned_docs` directories.
+   ```shell
+   cp versioned_sidebars/version-v1.11-sidebars.json versioned_sidebars/version-vX.Y-sidebars.json
+   cd versioned_docs && ln -s ../opentofu-repo/vX.Y/website/docs version-vX.Y
+   ```
+8. Recreate the `docs` symlink in the root of the repository to refer to the `website` directory from the newly-added submodule, so that the new branch is used for unversioned doc URLs.
+   ```shell
+   # (make sure that your current working directory is the repository root)
+   rm docs
+   ln -s opentofu-repo/vX.Y/website/docs docs
    ```
 
 </details>
@@ -343,6 +365,11 @@ Now you can commit your changes and open a pull request.
 
 ---
 
+## Updating govulncheck github workflow (only for stable releases)
+In [.github/workflows/govulncheck.yml](.github/workflows/govulncheck.yml), there is a matrix with the actively
+maintained versions of OpenTofu.
+When the new branch for the stable version is created, update the matrix above by adding the new branch and removing the deprecated version.
+
 ## Testing the release
 
 Make sure you have a Linux box with Snapcraft installed and download the installer shell script from `https://get.opentofu.org/install-opentofu.sh`.
@@ -368,7 +395,6 @@ Now test the following 3 installation methods to make sure all distribution poin
 
 Once you are happy that the release works, post the announcements to the following places:
 
-- Alpha: Community Slack, Linkedin, X, Blog, YouTube
 - Beta: Community Slack, Linkedin, X, Blog
 - Stable: Community Slack, Linkedin, X, Blog
 - Point release: Community Slack

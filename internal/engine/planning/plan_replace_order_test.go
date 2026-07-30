@@ -70,14 +70,14 @@ func TestFindEffectiveReplaceOrders(t *testing.T) {
 					ReplaceOrder: replaceAnyOrder,
 				})
 				objs.Put(&resourceInstanceObject{
-					Addr:         objAddr("b"),
-					ReplaceOrder: replaceAnyOrder,
-					Dependencies: addrs.MakeSet(objAddr("a")),
+					Addr:               objAddr("b"),
+					ReplaceOrder:       replaceAnyOrder,
+					ConfigDependencies: addrs.MakeSet(objAddr("a")),
 				})
 				objs.Put(&resourceInstanceObject{
-					Addr:         objAddr("c"),
-					ReplaceOrder: replaceAnyOrder,
-					Dependencies: addrs.MakeSet(objAddr("a"), objAddr("b")),
+					Addr:               objAddr("c"),
+					ReplaceOrder:       replaceAnyOrder,
+					ConfigDependencies: addrs.MakeSet(objAddr("a"), objAddr("b")),
 				})
 			},
 			addrs.MakeMap(
@@ -103,14 +103,14 @@ func TestFindEffectiveReplaceOrders(t *testing.T) {
 					ReplaceOrder: replaceCreateThenDestroy,
 				})
 				objs.Put(&resourceInstanceObject{
-					Addr:         objAddr("b"),
-					ReplaceOrder: replaceAnyOrder,
-					Dependencies: addrs.MakeSet(objAddr("a")),
+					Addr:               objAddr("b"),
+					ReplaceOrder:       replaceAnyOrder,
+					ConfigDependencies: addrs.MakeSet(objAddr("a")),
 				})
 				objs.Put(&resourceInstanceObject{
-					Addr:         objAddr("c"),
-					ReplaceOrder: replaceAnyOrder,
-					Dependencies: addrs.MakeSet(objAddr("a"), objAddr("b")),
+					Addr:               objAddr("c"),
+					ReplaceOrder:       replaceAnyOrder,
+					ConfigDependencies: addrs.MakeSet(objAddr("a"), objAddr("b")),
 				})
 			},
 			addrs.MakeMap(
@@ -120,11 +120,11 @@ func TestFindEffectiveReplaceOrders(t *testing.T) {
 				},
 				addrs.MapElem[addrs.AbsResourceInstanceObject, resourceInstanceReplaceOrder]{
 					Key:   objAddr("b"),
-					Value: replaceCreateThenDestroy,
+					Value: replaceDestroyThenCreate,
 				},
 				addrs.MapElem[addrs.AbsResourceInstanceObject, resourceInstanceReplaceOrder]{
 					Key:   objAddr("c"),
-					Value: replaceCreateThenDestroy,
+					Value: replaceDestroyThenCreate,
 				},
 			),
 			addrs.MakeSet[addrs.AbsResourceInstanceObject](),
@@ -136,14 +136,14 @@ func TestFindEffectiveReplaceOrders(t *testing.T) {
 					ReplaceOrder: replaceAnyOrder,
 				})
 				objs.Put(&resourceInstanceObject{
-					Addr:         objAddr("b"),
-					ReplaceOrder: replaceCreateThenDestroy,
-					Dependencies: addrs.MakeSet(objAddr("a")),
+					Addr:               objAddr("b"),
+					ReplaceOrder:       replaceCreateThenDestroy,
+					ConfigDependencies: addrs.MakeSet(objAddr("a")),
 				})
 				objs.Put(&resourceInstanceObject{
-					Addr:         objAddr("c"),
-					ReplaceOrder: replaceAnyOrder,
-					Dependencies: addrs.MakeSet(objAddr("a"), objAddr("b")),
+					Addr:               objAddr("c"),
+					ReplaceOrder:       replaceAnyOrder,
+					ConfigDependencies: addrs.MakeSet(objAddr("a"), objAddr("b")),
 				})
 			},
 			addrs.MakeMap(
@@ -157,7 +157,7 @@ func TestFindEffectiveReplaceOrders(t *testing.T) {
 				},
 				addrs.MapElem[addrs.AbsResourceInstanceObject, resourceInstanceReplaceOrder]{
 					Key:   objAddr("c"),
-					Value: replaceCreateThenDestroy,
+					Value: replaceDestroyThenCreate,
 				},
 			),
 			addrs.MakeSet[addrs.AbsResourceInstanceObject](),
@@ -169,14 +169,14 @@ func TestFindEffectiveReplaceOrders(t *testing.T) {
 					ReplaceOrder: replaceAnyOrder,
 				})
 				objs.Put(&resourceInstanceObject{
-					Addr:         objAddr("b"),
-					ReplaceOrder: replaceAnyOrder,
-					Dependencies: addrs.MakeSet(objAddr("a")),
+					Addr:               objAddr("b"),
+					ReplaceOrder:       replaceAnyOrder,
+					ConfigDependencies: addrs.MakeSet(objAddr("a")),
 				})
 				objs.Put(&resourceInstanceObject{
-					Addr:         objAddr("c"),
-					ReplaceOrder: replaceCreateThenDestroy,
-					Dependencies: addrs.MakeSet(objAddr("a"), objAddr("b")),
+					Addr:               objAddr("c"),
+					ReplaceOrder:       replaceCreateThenDestroy,
+					ConfigDependencies: addrs.MakeSet(objAddr("a"), objAddr("b")),
 				})
 			},
 			addrs.MakeMap(
@@ -202,9 +202,9 @@ func TestFindEffectiveReplaceOrders(t *testing.T) {
 					ReplaceOrder: replaceAnyOrder,
 				})
 				objs.Put(&resourceInstanceObject{
-					Addr:         objAddr("b"),
-					ReplaceOrder: replaceCreateThenDestroy,
-					Dependencies: addrs.MakeSet(objAddr("a")),
+					Addr:               objAddr("b"),
+					ReplaceOrder:       replaceCreateThenDestroy,
+					ConfigDependencies: addrs.MakeSet(objAddr("a")),
 				})
 				objs.Put(&resourceInstanceObject{
 					Addr:         objAddr("unchained"),
@@ -230,14 +230,14 @@ func TestFindEffectiveReplaceOrders(t *testing.T) {
 		"self-dependency": {
 			func(objs *resourceInstanceObjectsBuilder) {
 				objs.Put(&resourceInstanceObject{
-					Addr:         objAddr("a"),
-					ReplaceOrder: replaceAnyOrder,
-					Dependencies: addrs.MakeSet(objAddr("a"), objAddr("b")),
+					Addr:               objAddr("a"),
+					ReplaceOrder:       replaceAnyOrder,
+					ConfigDependencies: addrs.MakeSet(objAddr("a"), objAddr("b")),
 				})
 				objs.Put(&resourceInstanceObject{
-					Addr:         objAddr("b"),
-					ReplaceOrder: replaceAnyOrder,
-					Dependencies: addrs.MakeSet(objAddr("a"), objAddr("b")),
+					Addr:               objAddr("b"),
+					ReplaceOrder:       replaceAnyOrder,
+					ConfigDependencies: addrs.MakeSet(objAddr("a"), objAddr("b")),
 				})
 				objs.Put(&resourceInstanceObject{
 					Addr:         objAddr("c"),

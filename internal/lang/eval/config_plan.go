@@ -7,14 +7,18 @@ package eval
 
 import (
 	"context"
+	"fmt"
 	"iter"
 	"sync"
 
+	"github.com/hashicorp/hcl/v2"
 	"github.com/zclconf/go-cty/cty"
+	"github.com/zclconf/go-cty/cty/function"
 
 	"github.com/opentofu/opentofu/internal/addrs"
 	"github.com/opentofu/opentofu/internal/lang/eval/internal/configgraph"
 	"github.com/opentofu/opentofu/internal/lang/eval/internal/evalglue"
+	"github.com/opentofu/opentofu/internal/lang/exprs"
 	"github.com/opentofu/opentofu/internal/lang/grapheval"
 	"github.com/opentofu/opentofu/internal/tfdiags"
 )
@@ -26,9 +30,6 @@ import (
 // each other, and so implementations must use suitable synchronization to
 // avoid data races between calls.
 type PlanGlue interface {
-	// I'm not sure that this belongs here
-	ValidateProviderConfig(ctx context.Context, provider addrs.Provider, configVal cty.Value) tfdiags.Diagnostics
-
 	// Creates planned action(s) for the given resource instance and return
 	// the planned new state that would result from those actions.
 	//
@@ -137,10 +138,44 @@ func (c *ConfigInstance) DrivePlanning(ctx context.Context, buildGlue func(*Plan
 	if moreDiags.HasErrors() {
 		return nil, diags
 	}
+
+	managedProviders := newManagedProviders(c.evalContext.Providers, func(ctx context.Context, addr addrs.AbsProviderInstanceCorrect) (cty.Value, tfdiags.Diagnostics) {
+		ctx = grapheval.ContextWithNewWorker(ctx)
+
+		providerInst := evalglue.ProviderInstance(ctx, rootModuleInstance, addr)
+		if providerInst == nil {
+			// This suggests that the provider instance has an invalid
+			// configuration. The main diagnostics for that get returned by
+			// another channel but also return an error, so we just return
+			// nil to prompt the caller to generate its own error saying that
+			// whatever operation the provider was going to be used for cannot
+			// be performed.
+			//
+			// FIXME: This currently doesn't handle the case where there's
+			// an orphan or deposed resource instance object in the previous
+			// run state referring to a provider instance whose configuration
+			// was originally just implied to be empty by the existence of
+			// some resource elsewhere in the configuration. Removing all
+			// desired resource instances for such an implied provider when
+			// there's still at least one object tracked in the state causes
+			// us to return nil, here, whereas we ought to somehow attempt
+			// to perform the implicit empty configuration behavior in that
+			// case too.
+			return cty.NilVal, nil
+		}
+		// We ignore diagnostics here because the CheckAll tree walk should collect
+		// them when it visits the provider instance, and so they'll emerge through
+		// a different path.
+		configVal, _ := providerInst.ConfigValue(ctx)
+		return configgraph.PrepareOutgoingValue(configVal), nil
+	})
+
 	// We can now initialize the planning oracle, before we start evaluating
 	// anything that might cause calls to the evalGlue object.
-	oracle.rootModuleInstance = rootModuleInstance
-	oracle.evalContext = c.evalContext
+	oracle.root = rootModuleInstance
+	oracle.providers = managedProviders
+	// Inject configured providers
+	evalGlue.providers = managedProviders
 
 	// The plan phase is driven forward by us evaluating expressions during
 	// the "checkAll" process, and so we can just run that here and then
@@ -173,10 +208,9 @@ func (c *ConfigInstance) DrivePlanning(ctx context.Context, buildGlue func(*Plan
 	// Once checkAll has completed we should've either visited and evaluated
 	// everything as much as we can, so we can now just collect the result
 	// value and return.
-	outputsVal, moreDiags := rootModuleInstance.ResultValuer(ctx).Value(ctx)
-	diags = diags.Append(moreDiags)
+
 	return &PlanningResult{
-		RootModuleOutputs: configgraph.PrepareOutgoingValue(outputsVal),
+		RootModuleOutputs: CollectRootModuleOutputs(ctx, rootModuleInstance),
 		Glue:              glue,
 		Oracle:            oracle,
 	}, diags
@@ -203,24 +237,31 @@ type PlanningResult struct {
 	// This will contain unknown value placeholders for any part of an output
 	// value which depends on the result of an action that won't be taken
 	// until the apply phase.
-	RootModuleOutputs cty.Value
+	RootModuleOutputs RootModuleOutputs
 }
 
 type planningEvalGlue struct {
 	// planEngineGlue is the planning glue implementation provided by the
 	// planning engine when it called [ConfigInstance.DrivePlanning].
 	planEngineGlue PlanGlue
+	providers      *managedProviders
 }
 
 var _ evalglue.Glue = (*planningEvalGlue)(nil)
 
-// ValidateProviderConfig implements evalglue.Glue.
-func (p *planningEvalGlue) ValidateProviderConfig(ctx context.Context, provider addrs.Provider, configVal cty.Value) tfdiags.Diagnostics {
-	return p.planEngineGlue.ValidateProviderConfig(ctx, provider, configVal)
+// ProviderFunction implements evalglue.Glue.
+func (p *planningEvalGlue) ProviderFunction(ctx context.Context, provider addrs.Provider, providerInst exprs.FromValue[*configgraph.ProviderInstance], pf addrs.ProviderFunction, rng hcl.Range) (function.Function, tfdiags.Diagnostics) {
+	if providerInst, ok := providerInst.ValueOk(); ok {
+		return p.providers.ConfiguredFunction(ctx, providerInst.Addr, pf, rng)
+	}
+
+	return p.providers.BuildFunction(ctx, provider, pf, false, rng)
 }
 
 // ResourceInstanceValue implements evalglue.Glue.
-func (p *planningEvalGlue) ResourceInstanceValue(ctx context.Context, ri *configgraph.ResourceInstance, configVal cty.Value, providerInst configgraph.Maybe[*configgraph.ProviderInstance], riDeps addrs.Set[addrs.AbsResourceInstance]) (cty.Value, tfdiags.Diagnostics) {
+func (p *planningEvalGlue) ResourceInstanceValue(ctx context.Context, ri *configgraph.ResourceInstance, configVal cty.Value, providerInst exprs.FromValue[*configgraph.ProviderInstance], riDeps addrs.Set[addrs.AbsResourceInstance]) (cty.Value, tfdiags.Diagnostics) {
+	var diags tfdiags.Diagnostics
+
 	desired := &DesiredResourceInstance{
 		Addr:                      ri.Addr,
 		ConfigVal:                 configgraph.PrepareOutgoingValue(configVal),
@@ -228,25 +269,79 @@ func (p *planningEvalGlue) ResourceInstanceValue(ctx context.Context, ri *config
 		RequiredResourceInstances: riDeps,
 		ResourceType:              ri.Addr.Resource.Resource.Type,
 		ResourceMode:              ri.Addr.Resource.Resource.Mode,
-
-		// This reflects the direct create_before_destroy setting of just
-		// this one resource instance. During the planning phase we'll
-		// propagate "create-before-destroy-ness" to anything else in the
-		// same dependency chain as an instance with this set, but we
-		// can't do that until after the plan phase has discovered the
-		// entire resource instance graph.
-		//
-		// FIXME: Actually take this setting from the config. For now we
-		// just always assume it isn't set.
-		CreateBeforeDestroy: false,
+		IgnoreChangesPaths:        ri.IgnoreChangesPaths,
+		ReplaceTriggeredBy:        ri.ReplaceTriggeredBy,
 	}
-	if providerInst, ok := configgraph.GetKnown(providerInst); ok {
+	// FIXME: DesiredResourceInstance is using a possibly-nil pointer to
+	// addrs.AbsProviderInstanceCorrect as a legacy way to represent a
+	// provider instance address that might be unknown, since it was written
+	// before we had exprs.FromValue. We should eventually update that type
+	// so that its ProviderInstance field is
+	// exprs.FromValue[addrs.AbsProviderInstanceCorrect] but we'll shim to
+	// the legacy form for now.
+	unmarkedProviderInst, _ := providerInst.Unmark()
+	if providerInst, ok := unmarkedProviderInst.ValueOk(); ok {
 		desired.ProviderInstance = &providerInst.Addr
 	}
+
+	cbdVal, cbdRng, moreDiags := ri.CreateBeforeDestroy(ctx)
+	diags = diags.Append(moreDiags)
+	if !exprs.IsEvalError(cbdVal) {
+		const errSummary = "Invalid create_before_destroy argument"
+		unmarkedVal, _ := cbdVal.Unmark()
+		var subjRng *hcl.Range
+		if cbdRng != nil {
+			subjRng = cbdRng.ToHCL().Ptr()
+		}
+		if !unmarkedVal.IsKnown() {
+			// FIXME: Instead of being an error, this should just force deferring
+			// the planning of this resource instance. That'll take some
+			// refactoring to make it possible for us to defer at this layer,
+			// though.
+			diags = diags.Append(&hcl.Diagnostic{
+				Severity: hcl.DiagError,
+				Summary:  errSummary,
+				Detail:   fmt.Sprintf("The create_before_destroy setting for %s is derived from a value that won't be decided until the apply phase, which is invalid because OpenTofu needs to decide the order of operations during the plan phase.", desired.Addr),
+				Subject:  subjRng,
+			})
+		} else if unmarkedVal == cty.True {
+			desired.CreateBeforeDestroy = true
+		} else if unmarkedVal == cty.False {
+			// We reject "false" here for now because in future it might come
+			// to represent forcing the destroy-then-create order for situations
+			// where it's simply impossible for two objects to exist for the
+			// resource instance at the same time. If we do that then we'll
+			// need to change [DesiredResourceInstance.CreateBeforeDestroy] to
+			// be a more general "replace order" field that can accept all
+			// three possibilities of "create-then-destroy", "destroy-then-create",
+			// or "don't care".
+			diags = diags.Append(&hcl.Diagnostic{
+				Severity: hcl.DiagError,
+				Summary:  errSummary,
+				Detail:   fmt.Sprintf("The create_before_destroy setting for %s may not be set to false.\n\nIf this argument is present then it must be set to true. It is not currently possible to force destroy-then-create ordering.", desired.Addr),
+				Subject:  subjRng,
+			})
+		} else if !unmarkedVal.IsNull() {
+			// No other result should be possible if [CreateBeforeDestroy]
+			// was implemented correctly.
+			diags = diags.Append(tfdiags.Sourceless(
+				tfdiags.Error,
+				errSummary,
+				fmt.Sprintf("Internal processing of create_before_destroy for %s returned unexpected value %#v. This is a bug in OpenTofu.", desired.Addr, cbdVal),
+			))
+		}
+	}
+
 	// TODO: Populate everything else in [DesiredResourceInstance], once
 	// package configgraph knows how to provide those answers.
 
-	return p.planEngineGlue.PlanDesiredResourceInstance(ctx, desired)
+	if desired.Addr.Resource.Resource.Mode == addrs.EphemeralResourceMode {
+		return p.providers.OpenEphemeralResourceInstance(ctx, desired.Addr, desired.ConfigVal, desired.Provider, desired.ProviderInstance)
+	}
+
+	ret, moreDiags := p.planEngineGlue.PlanDesiredResourceInstance(ctx, desired)
+	diags = diags.Append(moreDiags)
+	return ret, diags
 }
 
 func announcePlanOrphans(ctx context.Context, glue PlanGlue, rootModuleInstance evalglue.CompiledModuleInstance) tfdiags.Diagnostics {

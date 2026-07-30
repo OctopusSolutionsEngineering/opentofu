@@ -18,14 +18,17 @@ import (
 
 	"github.com/opentofu/opentofu/internal/addrs"
 	"github.com/opentofu/opentofu/internal/command/format"
+	"github.com/opentofu/opentofu/internal/lang/marks"
 	"github.com/opentofu/opentofu/internal/plans"
 	"github.com/opentofu/opentofu/internal/providers"
 	"github.com/opentofu/opentofu/internal/states"
 	"github.com/opentofu/opentofu/internal/tofu"
 )
 
-const defaultPeriodicUiTimer = 10 * time.Second
-const maxIdLen = 80
+const (
+	defaultPeriodicUiTimer = 10 * time.Second
+	maxIdLen               = 80
+)
 
 func NewUiHook(view *View) *UiHook {
 	return &UiHook{
@@ -256,7 +259,13 @@ func (h *UiHook) PreProvisionInstanceStep(addr addrs.AbsResourceInstance, typeNa
 	return tofu.HookActionContinue, nil
 }
 
-func (h *UiHook) ProvisionOutput(addr addrs.AbsResourceInstance, typeName string, msg string) {
+func (h *UiHook) ProvisionOutput(addr addrs.AbsResourceInstance, typeName string, msg string, configMarks cty.ValueMarks) {
+	// If the config has sensitive marks and showSensitive is not enabled,
+	// suppress the output.
+	if _, hasSensitive := configMarks[marks.Sensitive]; hasSensitive && !h.view.showSensitive {
+		msg = "(output suppressed due to sensitive value in config)"
+	}
+
 	var buf bytes.Buffer
 
 	prefix := fmt.Sprintf(
@@ -314,28 +323,26 @@ func (h *UiHook) PostImportState(addr addrs.AbsResourceInstance, imported []prov
 	return tofu.HookActionContinue, nil
 }
 
-func (h *UiHook) PrePlanImport(addr addrs.AbsResourceInstance, importID string) (tofu.HookAction, error) {
+func (h *UiHook) PrePlanImport(addr addrs.AbsResourceInstance, target providers.ImportTarget) (tofu.HookAction, error) {
 	h.println(fmt.Sprintf(
-		h.view.colorize.Color("[reset][bold]%s: Preparing import... [id=%s]"),
-		addr, importID,
+		h.view.colorize.Color("[reset][bold]%s: Preparing import...%s"),
+		addr, describeImportFromTarget(target),
 	))
-
 	return tofu.HookActionContinue, nil
 }
 
 func (h *UiHook) PreApplyImport(addr addrs.AbsResourceInstance, importing plans.ImportingSrc) (tofu.HookAction, error) {
 	h.println(fmt.Sprintf(
-		h.view.colorize.Color("[reset][bold]%s: Importing... [id=%s]"),
-		addr, importing.ID,
+		h.view.colorize.Color("[reset][bold]%s: Importing...%s"),
+		addr, describeImportFromSrc(importing),
 	))
-
 	return tofu.HookActionContinue, nil
 }
 
 func (h *UiHook) PostApplyImport(addr addrs.AbsResourceInstance, importing plans.ImportingSrc) (tofu.HookAction, error) {
 	h.println(fmt.Sprintf(
-		h.view.colorize.Color("[reset][bold]%s: Import complete [id=%s]"),
-		addr, importing.ID,
+		h.view.colorize.Color("[reset][bold]%s: Import complete%s"),
+		addr, describeImportFromSrc(importing),
 	))
 
 	return tofu.HookActionContinue, nil
@@ -522,4 +529,36 @@ func truncateId(id string, maxLen int) string {
 	rightPart := rid[rightIdx:]
 
 	return string(leftPart) + string(dots) + string(rightPart)
+}
+
+// describeImport returns a bracketed suffix like " [id=foo]" or " [bucket=bar]"
+// for use in import progress messages. Returns an empty string if no useful
+// description can be determined.
+func describeImport(id string, identity cty.Value) string {
+	if id != "" {
+		return fmt.Sprintf(" [id=%s]", id)
+	}
+	if k, v := format.ObjectValueBestGuess(identity); k != "" {
+		return fmt.Sprintf(" [%s=%s]", k, v)
+	}
+	return ""
+}
+
+func describeImportFromSrc(importing plans.ImportingSrc) string {
+	if importing.ID != "" {
+		return describeImport(importing.ID, cty.NilVal)
+	}
+	ty, err := importing.Identity.ImpliedType()
+	if err != nil {
+		return ""
+	}
+	val, err := importing.Identity.Decode(ty)
+	if err != nil {
+		return ""
+	}
+	return describeImport("", val)
+}
+
+func describeImportFromTarget(target providers.ImportTarget) string {
+	return describeImport(target.ID, target.Identity)
 }

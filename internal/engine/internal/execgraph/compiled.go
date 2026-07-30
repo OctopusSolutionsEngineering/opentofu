@@ -18,6 +18,10 @@ import (
 	"github.com/opentofu/opentofu/internal/tfdiags"
 )
 
+type ResourceInstanceDependencyMissingMark struct {
+	Target string // addrs.AbsResourceInstance
+}
+
 type CompiledGraph struct {
 	// steps is the main essence of a compiled graph: a series of functions
 	// that we'll run all at once, one goroutine each, and then wait until
@@ -94,14 +98,19 @@ func (c *CompiledGraph) Execute(ctx context.Context) tfdiags.Diagnostics {
 	return diags
 }
 
-// ResourceInstanceValue blocks until after changes have been applied for the
-// given resource instance address and then returns a [cty.Value] that should
-// represent that resource instance in downstream expression evaluation.
+// ResourceInstanceValue returns the final resource instance value corrsponding with
+// the given address. It expects that for any address requested, the corresponding
+// resource graph node has already executed and recorded a value.
 //
-// Calls to this method should run concurrently with a call to
-// [CompiledGraph.Execute] because otherwise the operations that generate the
-// final state for resource instances will not run and thus this will block
-// indefinitely waiting for results that will never arrive.
+// Calls to this method should run concurrently with a call to [CompiledGraph.Execute]
+// because otherwise the operations that generate the final state for resource instances
+// will not run and thus this will block indefinitely waiting for results that will never
+// arrive.
+//
+// If the resource's value is not available for any reason, a [cty.DynamicVal] will
+// be returned, marked with [ResourceInstanceDependencyMissingMark]. This allows
+// the "unplanned reference" mark to propogate through the rest of the system and be
+// handled in locations where it can generate a detailed error diagnostic.
 func (c *CompiledGraph) ResourceInstanceValue(ctx context.Context, addr addrs.AbsResourceInstance) cty.Value {
 	getter, ok := c.resourceInstanceValues.GetOk(addr)
 	if !ok {
@@ -109,12 +118,12 @@ func (c *CompiledGraph) ResourceInstanceValue(ctx context.Context, addr addrs.Ab
 		// in the plan then we'll assume it was excluded from the plan by
 		// something like the -target option or deferred actions, and so we'll
 		// just return a completely-unknown placeholder to let the rest of the
-		// evaluation proceed. This should be valid as long as the planning
-		// phase made valid and consistent decisions about what to exclude,
-		// such that if a particular resource instance is excluded then any
-		// other resource or provider instance that depends on it must also be
-		// excluded.
-		return cty.DynamicVal
+		// evaluation proceed. This value is marked to indicate an issue providing
+		// the corresponding value and should be used to generate a detailed
+		// error message elsewhere.
+		return cty.DynamicVal.Mark(ResourceInstanceDependencyMissingMark{
+			Target: addr.String(),
+		})
 	}
 	return getter(ctx)
 }

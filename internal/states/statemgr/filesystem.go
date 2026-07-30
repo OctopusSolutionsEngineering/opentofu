@@ -224,7 +224,7 @@ func (s *Filesystem) persistState(schemas *tofu.Schemas) error {
 			}
 			defer bfh.Close()
 
-			err = statefile.Write(s.backupFile, bfh, s.encryption)
+			err = statefile.WriteIndent(s.backupFile, bfh, s.encryption)
 			if err != nil {
 				return fmt.Errorf("failed to write to local state backup file: %w", err)
 			}
@@ -268,7 +268,8 @@ func (s *Filesystem) persistState(schemas *tofu.Schemas) error {
 	}
 
 	log.Printf("[TRACE] statemgr.Filesystem: writing snapshot at %s", s.path)
-	if err := statefile.Write(s.file, s.stateFileOut, s.encryption); err != nil {
+
+	if err := statefile.WriteIndent(s.file, s.stateFileOut, s.encryption); err != nil {
 		return err
 	}
 

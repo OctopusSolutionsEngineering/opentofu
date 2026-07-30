@@ -17,14 +17,21 @@ import (
 	"github.com/opentofu/opentofu/internal/states"
 	"github.com/opentofu/opentofu/internal/tfdiags"
 	"github.com/zclconf/go-cty/cty"
+	ctyjson "github.com/zclconf/go-cty/cty/json"
 )
 
 // stateTransformArgs is a struct for convenience that holds the parameters required for state transformations
 type stateTransformArgs struct {
 	// currentAddr is the current/latest address of the resource
 	currentAddr addrs.AbsResourceInstance
+	// currentProviderAddr is the current/latest address of the resource's provider
+	currentProviderAddr addrs.Provider
+
 	// prevAddr is the previous address of the resource
-	prevAddr  addrs.AbsResourceInstance
+	prevAddr addrs.AbsResourceInstance
+	// prevProviderAddr is the previous address of the resource's provider
+	prevProviderAddr addrs.Provider
+
 	provider  providers.Interface
 	objectSrc *states.ResourceInstanceObjectSrc
 	// currentSchema is the latest schema of the resource
@@ -65,8 +72,7 @@ func upgradeResourceStateTransform(args stateTransformArgs) (cty.Value, []byte, 
 		args.objectSrc.AttrsJSON = stripRemovedStateAttributes(args.objectSrc.AttrsJSON, args.currentSchema.ImpliedType())
 	}
 
-	// TODO: This should eventually use a proper FQN.
-	providerType := args.currentAddr.Resource.Resource.ImpliedProvider()
+	providerType := args.currentProviderAddr
 
 	if args.objectSrc.SchemaVersion > args.currentSchemaVersion {
 		log.Printf("[TRACE] upgradeResourceStateTransform: can't downgrade state for %s from version %d to %d", args.currentAddr, args.objectSrc.SchemaVersion, args.currentSchemaVersion)
@@ -132,7 +138,7 @@ func moveResourceState(params stateTransformArgs) (*states.ResourceInstanceObjec
 func moveResourceStateTransform(args stateTransformArgs) (cty.Value, []byte, tfdiags.Diagnostics) {
 	log.Printf("[TRACE] moveResourceStateTransform: new address: %s, previous address: %s", args.currentAddr, args.prevAddr)
 	req := providers.MoveResourceStateRequest{
-		SourceProviderAddress: args.prevAddr.Resource.Resource.ImpliedProvider(),
+		SourceProviderAddress: args.prevProviderAddr.String(),
 		SourceTypeName:        args.prevAddr.Resource.Resource.Type,
 		SourceSchemaVersion:   args.objectSrc.SchemaVersion,
 		SourceStateJSON:       args.objectSrc.AttrsJSON,
@@ -143,7 +149,7 @@ func moveResourceStateTransform(args stateTransformArgs) (cty.Value, []byte, tfd
 	resp := args.provider.MoveResourceState(context.TODO(), req)
 	diags := resp.Diagnostics
 	if diags.HasErrors() {
-		log.Printf("[TRACE] moveResourceStateTransform: failed - new address: %s, previous address: %s - diags: %s", args.currentAddr, args.prevAddr, diags.Err().Error())
+		log.Printf("[TRACE] moveResourceStateTransform: failed - new address: %s %s, previous address: %s %s - diags: %s", args.currentProviderAddr, args.currentAddr, args.prevProviderAddr, args.prevAddr, diags.Err().Error())
 		return cty.NilVal, nil, diags
 	}
 	return resp.TargetState, resp.TargetPrivate, diags
@@ -170,7 +176,7 @@ func transformResourceState(args stateTransformArgs, stateTransform providerStat
 	// marshaling/unmarshaling of the new value, but we'll check it here
 	// anyway for robustness, e.g. for in-process providers.
 	if errs := newState.Type().TestConformance(args.currentSchema.ImpliedType()); len(errs) > 0 {
-		providerType := args.currentAddr.Resource.Resource.ImpliedProvider()
+		providerType := args.currentProviderAddr
 		for _, err := range errs {
 			diags = diags.Append(tfdiags.Sourceless(
 				tfdiags.Error,
@@ -276,4 +282,73 @@ func removeRemovedAttrs(v interface{}, ty cty.Type) bool {
 		}
 	}
 	return modified
+}
+
+// upgradeResourceIdentity upgrades the identity data if the schema version has changed
+func upgradeResourceIdentity(
+	ctx context.Context,
+	addr addrs.AbsResourceInstance,
+	src *states.ResourceInstanceObjectSrc,
+	provider providers.Interface,
+	providerAddr addrs.Provider,
+	providerSchema providers.ProviderSchema,
+	diags tfdiags.Diagnostics,
+) (*states.ResourceInstanceObjectSrc, tfdiags.Diagnostics) {
+	typeName := addr.Resource.Resource.Type
+	resourceSchema, ok := providerSchema.ResourceTypes[typeName]
+	if !ok {
+		return src, diags
+	}
+
+	currentIdentityVersion := resourceSchema.IdentitySchemaVersion
+	stateIdentityVersion := int64(0)
+	if src.IdentitySchemaVersion != nil {
+		stateIdentityVersion = int64(*src.IdentitySchemaVersion)
+	}
+
+	// Based on the logic in upgradeResourceStateTransform
+	if stateIdentityVersion > currentIdentityVersion {
+		// No downgrading allowed
+		log.Printf("[TRACE] upgradeResourceIdentity: can't downgrade identity for %s from version %d to %d", addr, stateIdentityVersion, currentIdentityVersion)
+		return src, diags.Append(tfdiags.Sourceless(
+			tfdiags.Error,
+			"Resource identity managed by newer provider version",
+			fmt.Sprintf("The current identity of %s was created by a newer provider version than is currently selected. Upgrade the %s provider to work with this identity.", addr, providerAddr),
+		))
+	}
+
+	if stateIdentityVersion == currentIdentityVersion {
+		// No upgrade necessary
+		return src, diags
+	}
+
+	log.Printf("[TRACE] upgradeResourceIdentity: upgrading identity for %s from version %d to %d", addr, stateIdentityVersion, currentIdentityVersion)
+
+	identityResp := provider.UpgradeResourceIdentity(ctx, providers.UpgradeResourceIdentityRequest{
+		TypeName:        typeName,
+		Version:         stateIdentityVersion,
+		RawIdentityJSON: src.IdentityJSON,
+	})
+	diags = diags.Append(identityResp.Diagnostics)
+
+	if identityResp.Diagnostics.HasErrors() {
+		return src, diags
+	}
+
+	// Re-encode the upgraded identity
+	identitySchema := resourceSchema.IdentitySchema
+	if identitySchema == nil {
+		diags = diags.Append(fmt.Errorf("identity schema is required to re-encode upgraded identity for %s", typeName))
+		return src, diags
+	}
+	newIdentityJSON, err := ctyjson.Marshal(identityResp.UpgradedIdentity, identitySchema.ImpliedType())
+	if err != nil {
+		diags = diags.Append(fmt.Errorf("failed to encode upgraded identity: %w", err))
+		return src, diags
+	}
+	src.IdentityJSON = newIdentityJSON
+	newVersion := uint64(currentIdentityVersion)
+	src.IdentitySchemaVersion = &newVersion
+
+	return src, diags
 }

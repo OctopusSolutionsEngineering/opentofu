@@ -15,6 +15,7 @@ import (
 
 	"github.com/opentofu/opentofu/internal/addrs"
 	"github.com/opentofu/opentofu/internal/engine/internal/exec"
+	"github.com/opentofu/opentofu/internal/lang/exprs"
 	"github.com/opentofu/opentofu/internal/lang/grapheval"
 	"github.com/opentofu/opentofu/internal/tfdiags"
 )
@@ -101,12 +102,8 @@ func (c *compiler) Compile() (*CompiledGraph, tfdiags.Diagnostics) {
 		operands := newCompilerOperands(opDesc.opCode, c.compileOperands(opDesc.operands))
 		var compileFunc func(operands *compilerOperands) nodeExecuteRaw
 		switch opDesc.opCode {
-		case opProviderInstanceConfig:
-			compileFunc = c.compileOpProviderInstanceConfig
-		case opProviderInstanceOpen:
-			compileFunc = c.compileOpProviderInstanceOpen
-		case opProviderInstanceClose:
-			compileFunc = c.compileOpProviderInstanceClose
+		case opResourceInstanceCurrentMeta:
+			compileFunc = c.compileOpResourceInstanceCurrentMeta
 		case opResourceInstanceDesired:
 			compileFunc = c.compileOpResourceInstanceDesired
 		case opResourceInstancePrior:
@@ -115,20 +112,18 @@ func (c *compiler) Compile() (*CompiledGraph, tfdiags.Diagnostics) {
 			compileFunc = c.compileOpManagedFinalPlan
 		case opManagedApply:
 			compileFunc = c.compileOpManagedApply
-		case opManagedDepose:
-			compileFunc = c.compileOpManagedDepose
+		case opManagedPrepareDepose:
+			compileFunc = c.compileOpManagedPrepareDepose
+		case opManagedPerformDepose:
+			compileFunc = c.compileOpManagedPerformDepose
+		case opManagedDesposedMeta:
+			compileFunc = c.compileOpManagedDeposedMeta
 		case opManagedAlreadyDeposed:
 			compileFunc = c.compileOpManagedAlreadyDeposed
 		case opManagedChangeAddr:
 			compileFunc = c.compileOpManagedChangeAddr
 		case opDataRead:
 			compileFunc = c.compileOpDataRead
-		case opEphemeralOpen:
-			compileFunc = c.compileOpEphemeralOpen
-		case opEphemeralState:
-			compileFunc = c.compileOpEphemeralState
-		case opEphemeralClose:
-			compileFunc = c.compileOpEphemeralClose
 		default:
 			c.diags = c.diags.Append(tfdiags.Sourceless(
 				tfdiags.Error,
@@ -178,7 +173,7 @@ func (c *compiler) Compile() (*CompiledGraph, tfdiags.Diagnostics) {
 		c.compiledGraph.resourceInstanceValues.Put(instAddr, func(ctx context.Context) cty.Value {
 			rawResult, ok, _ := execFunc(ctx)
 			if !ok {
-				return cty.DynamicVal
+				return exprs.AsEvalError(cty.DynamicVal)
 			}
 			finalStateObj := rawResult.(*exec.ResourceInstanceObject)
 			if finalStateObj == nil {
@@ -225,6 +220,12 @@ func (c *compiler) compileResultRef(ref AnyResultRef) nodeExecuteRaw {
 		index := ref.index
 		return func(_ context.Context) (any, bool, tfdiags.Diagnostics) {
 			return resourceInstAddrs[index], true, nil
+		}
+	case deposedKeyResultRef:
+		deposedKeys := c.sourceGraph.deposedKeys
+		index := ref.index
+		return func(_ context.Context) (any, bool, tfdiags.Diagnostics) {
+			return deposedKeys[index], true, nil
 		}
 	case providerInstAddrResultRef:
 		providerInstAddrs := c.sourceGraph.providerInstAddrs

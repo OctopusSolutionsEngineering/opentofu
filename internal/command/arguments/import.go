@@ -12,18 +12,23 @@ import (
 
 // Import represents the command-line arguments for the import command.
 type Import struct {
+	// ResourceAddress is the absolute resource address that the user is required to provide to indicate
+	// on which configuration resource the state of the resource needs to be imported.
 	ResourceAddress string
-	ResourceID      string
-	ConfigPath      string
-	Parallelism     int
+	// ResourceID is the platform provided ID of the resource to be imported.
+	ResourceID string
+	// ConfigPath is the path to the directory where the configuration containing the ResourceAddress is
+	// accessible.
+	ConfigPath string
+	// Parallelism is the limit of concurrent operation as OpenTofu walks the graph
+	Parallelism int
 
 	// ViewOptions specifies which view options to use
 	ViewOptions ViewOptions
-
-	// Vars holds and provides information for the flags related to variables that a user can give into the process
-	Vars    *Vars
+	// State, Backend and Vars are the common extended flags
 	State   *State
 	Backend *Backend
+	Vars    *Vars
 }
 
 // ParseImport processes CLI arguments, returning an Import value, a closer function, and errors.
@@ -39,10 +44,11 @@ func ParseImport(args []string, wd *workdir.Dir) (*Import, func(), tfdiags.Diagn
 	// Get the pwd since its our default -config flag value
 	pwd := wd.NormalizePath(wd.RootModuleDir())
 
-	cmdFlags := extendedFlagSet("import", ret.State, nil, ret.Vars)
-	ret.Backend.AddIgnoreRemoteVersionFlag(cmdFlags)
+	cmdFlags := extendedFlagSet("import", nil, ret.Vars)
 	cmdFlags.IntVar(&ret.Parallelism, "parallelism", DefaultParallelism, "parallelism")
 	cmdFlags.StringVar(&ret.ConfigPath, "config", pwd, "path")
+	ret.Backend.AddIgnoreRemoteVersionFlag(cmdFlags)
+	ret.State.addFlags(cmdFlags, stateFlagAll)
 	ret.ViewOptions.AddFlags(cmdFlags, true)
 
 	if err := cmdFlags.Parse(args); err != nil {

@@ -310,6 +310,9 @@ func (c *Context) checkApplyGraph(ctx context.Context, plan *plans.Plan, config 
 		log.Println("[DEBUG] no planned changes, skipping apply graph check")
 		return nil
 	}
+	if experimentalRuntimeEnabled() {
+		return nil
+	}
 	log.Println("[DEBUG] building apply graph to check for errors")
 	_, _, diags := c.applyGraph(ctx, plan, config, make(ProviderFunctionMapping), nil)
 	return diags
@@ -386,13 +389,10 @@ func (c *Context) refreshOnlyPlan(ctx context.Context, config *configs.Config, p
 	// to refresh only, the set of resource changes should always be empty.
 	// We'll safety-check that here so we can return a clear message about it,
 	// rather than probably just generating confusing output at the UI layer.
-	// Because the ephemeral resources changes in the plan are meant to be used
-	// later to build the apply graph, those shouldn't be counted when we are
-	// doing this check.
-	if changes := plan.Changes.ActionableResources(); len(changes) != 0 {
+	if len(plan.Changes.Resources) != 0 {
 		// Some extra context in the logs in case the user reports this message
 		// as a bug, as a starting point for debugging.
-		for _, rc := range changes {
+		for _, rc := range plan.Changes.Resources {
 			if depKey := rc.DeposedKey; depKey == states.NotDeposed {
 				log.Printf("[DEBUG] Refresh-only plan includes %s change for %s", rc.Action, rc.Addr)
 			} else {
@@ -422,6 +422,15 @@ func (c *Context) destroyPlan(ctx context.Context, config *configs.Config, prevR
 
 	priorState := prevRunState
 
+	skipNormalPlanForRefresh := opts.SkipRefresh
+	if experimentalRuntimeEnabled() {
+		// When we're shimming to the experimental runtime it's that runtime's
+		// responsibility to deal with refreshing however it wants to do it,
+		// rather than us forcing it to handle it by running a normal plan first
+		// and then taking the prior state from it.
+		skipNormalPlanForRefresh = true
+	}
+
 	// A destroy plan starts by running Refresh to read any pending data
 	// sources, and remove missing managed resources. This is required because
 	// a "destroy plan" is only creating delete changes, and is essentially a
@@ -433,7 +442,7 @@ func (c *Context) destroyPlan(ctx context.Context, config *configs.Config, prevR
 	// must coordinate with this by taking that action only when c.skipRefresh
 	// _is_ set. This coupling between the two is unfortunate but necessary
 	// to work within our current structure.
-	if !opts.SkipRefresh && !prevRunState.Empty() {
+	if !skipNormalPlanForRefresh && !prevRunState.Empty() {
 		log.Printf("[TRACE] Context.destroyPlan: calling Context.plan to get the effect of refreshing the prior state")
 		refreshOpts := *opts
 		refreshOpts.Mode = plans.NormalMode
@@ -769,6 +778,13 @@ func (c *Context) planWalk(ctx context.Context, config *configs.Config, prevRunS
 	var diags tfdiags.Diagnostics
 	log.Printf("[DEBUG] Building and walking plan graph for %s", opts.Mode)
 
+	// TEMP: Opt-in support for testing with the new experimental language
+	// runtime. Refer to backend_temp_new_runtime.go for more information.
+	if experimentalRuntimeEnabled() {
+		plan, moreDiags := c.newEnginePlan(ctx, config, prevRunState, opts)
+		return plan, diags.Append(moreDiags)
+	}
+
 	prevRunState = prevRunState.DeepCopy() // don't modify the caller's object when we process the moves
 	moveStmts, moveResults := c.prePlanFindAndApplyMoves(config, prevRunState)
 
@@ -780,13 +796,6 @@ func (c *Context) planWalk(ctx context.Context, config *configs.Config, prevRunS
 		// instances excluded by targeting then planning is likely to encounter
 		// strange problems that may lead to confusing error messages.
 		return nil, diags
-	}
-
-	// TEMP: Opt-in support for testing with the new experimental language
-	// runtime. Refer to backend_temp_new_runtime.go for more information.
-	if experimentalRuntimeEnabled() {
-		plan, moreDiags := c.newEnginePlan(ctx, config, prevRunState, opts)
-		return plan, diags.Append(moreDiags)
 	}
 
 	providerFunctionTracker := make(ProviderFunctionMapping)
@@ -972,7 +981,11 @@ func (c *Context) driftedResources(ctx context.Context, config *configs.Config, 
 					prevRunAddr = move.From
 				}
 
-				if isResourceMovedToDifferentType(addr, prevRunAddr) {
+				// Note: provider addr is provided twice;
+				// we cannot compare the currently configured provider
+				// with the resource's provider from the previous state, so
+				// we'll skip the provider check
+				if isResourceMovedToDifferentType(addr, prevRunAddr, provider, provider) {
 					// We don't report drift in case of resource type change
 					continue
 				}
@@ -991,7 +1004,7 @@ func (c *Context) driftedResources(ctx context.Context, config *configs.Config, 
 					))
 					continue
 				}
-				ty := schema.ImpliedType()
+				ty := schema.Block.ImpliedType()
 
 				oldObj, err := oldIS.Current.Decode(ty)
 				if err != nil {
@@ -1049,18 +1062,28 @@ func (c *Context) driftedResources(ctx context.Context, config *configs.Config, 
 					action = plans.NoOp
 				}
 
+				var oldObjIdentity, newObjIdentity cty.Value
+				if oldObj != nil {
+					oldObjIdentity = oldObj.Identity
+				}
+				if newObj != nil {
+					newObjIdentity = newObj.Identity
+				}
+
 				change := &plans.ResourceInstanceChange{
 					Addr:         addr,
 					PrevRunAddr:  prevRunAddr,
 					ProviderAddr: rs.ProviderConfig,
 					Change: plans.Change{
-						Action: action,
-						Before: oldVal,
-						After:  newVal,
+						Action:         action,
+						Before:         oldVal,
+						After:          newVal,
+						BeforeIdentity: oldObjIdentity,
+						AfterIdentity:  newObjIdentity,
 					},
 				}
 
-				changeSrc, err := change.Encode(ty)
+				changeSrc, err := change.Encode(schema)
 				if err != nil {
 					diags = diags.Append(err)
 					return nil, diags

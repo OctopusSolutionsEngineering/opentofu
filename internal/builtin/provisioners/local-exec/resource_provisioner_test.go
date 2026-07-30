@@ -16,6 +16,7 @@ import (
 
 	"github.com/mitchellh/cli"
 	"github.com/zclconf/go-cty/cty"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/opentofu/opentofu/internal/provisioners"
 )
@@ -32,7 +33,7 @@ func TestResourceProvider_Apply(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resp := p.ProvisionResource(provisioners.ProvisionResourceRequest{
+	resp := p.ProvisionResource(t.Context(), provisioners.ProvisionResourceRequest{
 		Config:   c,
 		UIOutput: output,
 	})
@@ -79,7 +80,7 @@ func TestResourceProvider_stop(t *testing.T) {
 	var provisionerResp atomic.Pointer[provisioners.ProvisionResourceResponse]
 	go func() {
 		defer close(doneCh)
-		resp := p.ProvisionResource(provisioners.ProvisionResourceRequest{
+		resp := p.ProvisionResource(t.Context(), provisioners.ProvisionResourceRequest{
 			Config:   c,
 			UIOutput: output,
 		})
@@ -140,7 +141,7 @@ func TestResourceProvider_ApplyCustomInterpreter(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resp := p.ProvisionResource(provisioners.ProvisionResourceRequest{
+	resp := p.ProvisionResource(t.Context(), provisioners.ProvisionResourceRequest{
 		Config:   c,
 		UIOutput: output,
 	})
@@ -180,7 +181,7 @@ func TestResourceProvider_ApplyCustomWorkingDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resp := p.ProvisionResource(provisioners.ProvisionResourceRequest{
+	resp := p.ProvisionResource(t.Context(), provisioners.ProvisionResourceRequest{
 		Config:   c,
 		UIOutput: output,
 	})
@@ -224,7 +225,7 @@ func TestResourceProvider_ApplyCustomEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resp := p.ProvisionResource(provisioners.ProvisionResourceRequest{
+	resp := p.ProvisionResource(t.Context(), provisioners.ProvisionResourceRequest{
 		Config:   c,
 		UIOutput: output,
 	})
@@ -284,7 +285,7 @@ func TestResourceProvider_ApplyNullCommand(t *testing.T) {
 		"quiet":       cty.NullVal(cty.Bool),
 	})
 
-	resp := p.ProvisionResource(provisioners.ProvisionResourceRequest{
+	resp := p.ProvisionResource(t.Context(), provisioners.ProvisionResourceRequest{
 		Config:   cfg,
 		UIOutput: output,
 	})
@@ -331,10 +332,141 @@ func TestResourceProvisioner_nullsInOptionals(t *testing.T) {
 			}
 
 			// verifying there are no panics
-			p.ProvisionResource(provisioners.ProvisionResourceRequest{
+			p.ProvisionResource(t.Context(), provisioners.ProvisionResourceRequest{
 				Config:   cfg,
 				UIOutput: output,
 			})
 		})
+	}
+}
+
+// testSpanContext returns a known-valid SpanContext for use in tests.
+func testSpanContext() trace.SpanContext {
+	traceID, _ := trace.TraceIDFromHex("0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f")
+	spanID, _ := trace.SpanIDFromHex("0f0f0f0f0f0f0f0f")
+	return trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    traceID,
+		SpanID:     spanID,
+		TraceFlags: trace.FlagsSampled,
+		Remote:     true,
+	})
+}
+
+func TestResourceProvider_TraceparentPropagation(t *testing.T) {
+	output := cli.NewMockUi()
+	p := New()
+	schema := p.GetSchema().Provisioner
+
+	command := "echo $TRACEPARENT"
+	if runtime.GOOS == "windows" {
+		command = "echo %TRACEPARENT%"
+	}
+
+	c, err := schema.CoerceValue(cty.ObjectVal(map[string]cty.Value{
+		"command": cty.StringVal(command),
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := trace.ContextWithSpanContext(t.Context(), testSpanContext())
+
+	resp := p.ProvisionResource(ctx, provisioners.ProvisionResourceRequest{
+		Config:   c,
+		UIOutput: output,
+	})
+
+	if resp.Diagnostics.HasErrors() {
+		t.Fatal(resp.Diagnostics.Err())
+	}
+
+	got := strings.TrimSpace(output.OutputWriter.String())
+	want := "00-0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f-0f0f0f0f0f0f0f0f-01"
+	if !strings.Contains(got, want) {
+		t.Errorf("expected TRACEPARENT %q in output, got %q", want, got)
+	}
+}
+
+func TestResourceProvider_TraceparentNotSetWithoutSpan(t *testing.T) {
+	t.Setenv("TRACEPARENT", "")
+
+	output := cli.NewMockUi()
+	p := New()
+	schema := p.GetSchema().Provisioner
+
+	command := "echo traceparent_is_${TRACEPARENT:-unset}"
+	expectedOutput := "traceparent_is_unset"
+	if runtime.GOOS == "windows" {
+		command = "echo traceparent_is_%TRACEPARENT%"
+		// On Unix, the shell substitutes ${TRACEPARENT:-unset} to "unset".
+		// On Windows, cmd.exe leaves %TRACEPARENT% unexpanded when the
+		// variable is empty, so the literal marker appears in the output.
+		// Either result confirms the provisioner did not inject TRACEPARENT.
+		expectedOutput = "traceparent_is_%TRACEPARENT%"
+	}
+
+	c, err := schema.CoerceValue(cty.ObjectVal(map[string]cty.Value{
+		"command": cty.StringVal(command),
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp := p.ProvisionResource(t.Context(), provisioners.ProvisionResourceRequest{
+		Config:   c,
+		UIOutput: output,
+	})
+
+	if resp.Diagnostics.HasErrors() {
+		t.Fatal(resp.Diagnostics.Err())
+	}
+
+	got := strings.TrimSpace(output.OutputWriter.String())
+
+	if !strings.Contains(got, expectedOutput) {
+		t.Errorf("expected TRACEPARENT to be unset without span context, got %q", got)
+	}
+}
+
+func TestResourceProvider_TraceparentUserOverride(t *testing.T) {
+	output := cli.NewMockUi()
+	p := New()
+	schema := p.GetSchema().Provisioner
+
+	userTraceparent := "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01"
+	command := "echo $TRACEPARENT"
+	if runtime.GOOS == "windows" {
+		command = "echo %TRACEPARENT%"
+	}
+
+	c, err := schema.CoerceValue(cty.ObjectVal(map[string]cty.Value{
+		"command": cty.StringVal(command),
+		"environment": cty.MapVal(map[string]cty.Value{
+			"TRACEPARENT": cty.StringVal(userTraceparent),
+		}),
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := trace.ContextWithSpanContext(t.Context(), testSpanContext())
+
+	resp := p.ProvisionResource(ctx, provisioners.ProvisionResourceRequest{
+		Config:   c,
+		UIOutput: output,
+	})
+
+	if resp.Diagnostics.HasErrors() {
+		t.Fatal(resp.Diagnostics.Err())
+	}
+
+	got := strings.TrimSpace(output.OutputWriter.String())
+	if !strings.Contains(got, userTraceparent) {
+		t.Errorf("expected user-specified TRACEPARENT %q, got %q", userTraceparent, got)
+	}
+	// The span context's traceparent should NOT appear
+	autoTraceparent := "00-0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f-0f0f0f0f0f0f0f0f-01"
+	if strings.Contains(got, autoTraceparent) {
+		t.Errorf("expected user override to take precedence, but found auto-generated TRACEPARENT in output")
 	}
 }

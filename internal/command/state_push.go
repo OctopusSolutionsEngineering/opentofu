@@ -13,7 +13,7 @@ import (
 	"strings"
 
 	"github.com/mitchellh/cli"
-	"github.com/opentofu/opentofu/internal/command/flags"
+	"github.com/opentofu/opentofu/internal/tfdiags"
 
 	"github.com/opentofu/opentofu/internal/command/arguments"
 	"github.com/opentofu/opentofu/internal/command/clistate"
@@ -39,12 +39,6 @@ func (c *StatePushCommand) Run(rawArgs []string) int {
 	// in order to keep functional parity, we setup the view to add a new line after each diagnostic.
 	c.View.DiagsWithNewline()
 
-	// Propagate -no-color for legacy use of Ui. The remote backend and
-	// cloud package use this; it should be removed when/if they are
-	// migrated to views.
-	c.Meta.color = !common.NoColor
-	c.Meta.Color = c.Meta.color
-
 	// Parse and validate flags
 	args, closer, diags := arguments.ParseStatePush(rawArgs)
 	defer closer()
@@ -52,20 +46,16 @@ func (c *StatePushCommand) Run(rawArgs []string) int {
 	// Instantiate the view, even if there are flag errors, so that we render
 	// diagnostics according to the desired view
 	view := views.NewState(args.ViewOptions, c.View)
-	// ... and initialise the Meta.Ui to wrap Meta.View into a new implementation
-	// that is able to print by using View abstraction and use the Meta.Ui
-	// to ask for the user input.
-	c.Meta.configureUiFromView(args.ViewOptions)
 	if diags.HasErrors() {
 		view.Diagnostics(diags)
+		if args.ViewOptions.ViewType == arguments.ViewJSON {
+			return 1 // in case it's json, do not print the help of the command
+		}
 		return cli.RunResultHelp
 	}
-	// TODO meta-refactor: remove these assignments once we have a clear way to propagate these to the logic
-	//  that uses them
-	c.GatherVariables(args.Vars)
-	c.stateLock = args.Backend.StateLock
-	c.stateLockTimeout = args.Backend.StateLockTimeout
-	c.ignoreRemoteVersion = args.Backend.IgnoreRemoteVersion
+	c.Meta.variableArgs = args.Vars.All()
+	c.Meta.stateArgs = *args.State
+	c.Meta.backendArgs = *args.Backend
 
 	if diags := c.Meta.checkRequiredVersion(ctx); diags != nil {
 		view.Diagnostics(diags)
@@ -85,7 +75,11 @@ func (c *StatePushCommand) Run(rawArgs []string) int {
 	if src := args.StateSrc; src != "-" {
 		f, err := os.Open(src)
 		if err != nil {
-			view.Diagnostics(diags.Append(err))
+			view.Diagnostics(diags.Append(tfdiags.Sourceless(
+				tfdiags.Error,
+				"Failed to open the given state file",
+				err.Error(),
+			)))
 			return 1
 		}
 		// Note: we don't need to defer a Close here because we do a close
@@ -100,7 +94,11 @@ func (c *StatePushCommand) Run(rawArgs []string) int {
 		c.Close()
 	}
 	if err != nil {
-		view.Diagnostics(diags.Append(fmt.Errorf("Error reading source state %q: %s", args.StateSrc, err)))
+		view.Diagnostics(diags.Append(tfdiags.Sourceless(
+			tfdiags.Error,
+			fmt.Sprintf("Failed to read source state %q", args.StateSrc),
+			err.Error(),
+		)))
 		return 1
 	}
 
@@ -114,7 +112,11 @@ func (c *StatePushCommand) Run(rawArgs []string) int {
 	// Determine the workspace name
 	workspace, err := c.Workspace(ctx)
 	if err != nil {
-		view.Diagnostics(diags.Append(fmt.Errorf("Error selecting workspace: %s", err)))
+		view.Diagnostics(diags.Append(tfdiags.Sourceless(
+			tfdiags.Error,
+			"Error selecting workspace",
+			err.Error(),
+		)))
 		return 1
 	}
 
@@ -128,12 +130,16 @@ func (c *StatePushCommand) Run(rawArgs []string) int {
 	// Get the state manager for the currently-selected workspace
 	stateMgr, err := b.StateMgr(ctx, workspace)
 	if err != nil {
-		view.Diagnostics(diags.Append(fmt.Errorf("Failed to load destination state: %s", err)))
+		view.Diagnostics(diags.Append(tfdiags.Sourceless(
+			tfdiags.Error,
+			"Failed to load destination state",
+			err.Error(),
+		)))
 		return 1
 	}
 
-	if c.stateLock {
-		stateLocker := clistate.NewLocker(c.stateLockTimeout, views.NewStateLocker(args.ViewOptions, c.View))
+	if c.stateArgs.Lock {
+		stateLocker := clistate.NewLocker(c.stateArgs.LockTimeout, view.Backend().StateLocker())
 		if diags := stateLocker.Lock(stateMgr, "state-push"); diags.HasErrors() {
 			view.Diagnostics(diags)
 			return 1
@@ -146,7 +152,11 @@ func (c *StatePushCommand) Run(rawArgs []string) int {
 	}
 
 	if err := stateMgr.RefreshState(context.TODO()); err != nil {
-		view.Diagnostics(diags.Append(fmt.Errorf("Failed to refresh destination state: %s", err)))
+		view.Diagnostics(diags.Append(tfdiags.Sourceless(
+			tfdiags.Error,
+			"Failed to refresh destination state",
+			err.Error(),
+		)))
 		return 1
 	}
 
@@ -157,7 +167,11 @@ func (c *StatePushCommand) Run(rawArgs []string) int {
 
 	// Import it, forcing through the lineage/serial if requested and possible.
 	if err := statemgr.Import(srcStateFile, stateMgr, args.Force); err != nil {
-		view.Diagnostics(diags.Append(fmt.Errorf("Failed to write state: %s", err)))
+		view.Diagnostics(diags.Append(tfdiags.Sourceless(
+			tfdiags.Error,
+			"Failed to write the imported state",
+			err.Error(),
+		)))
 		return 1
 	}
 
@@ -168,11 +182,19 @@ func (c *StatePushCommand) Run(rawArgs []string) int {
 	}
 
 	if err := stateMgr.WriteState(srcStateFile.State); err != nil {
-		view.Diagnostics(diags.Append(fmt.Errorf("Failed to write state: %s", err)))
+		view.Diagnostics(diags.Append(tfdiags.Sourceless(
+			tfdiags.Error,
+			"Failed to write state",
+			err.Error(),
+		)))
 		return 1
 	}
 	if err := stateMgr.PersistState(context.TODO(), schemas); err != nil {
-		view.Diagnostics(diags.Append(fmt.Errorf("Failed to persist state: %s", err)))
+		view.Diagnostics(diags.Append(tfdiags.Sourceless(
+			tfdiags.Error,
+			"Failed to persist state",
+			err.Error(),
+		)))
 		return 1
 	}
 
@@ -233,22 +255,4 @@ Options:
 
 func (c *StatePushCommand) Synopsis() string {
 	return "Update remote state from a local state file"
-}
-
-// TODO meta-refactor: move this to arguments once all commands are using the same shim logic
-func (c *StatePushCommand) GatherVariables(args *arguments.Vars) {
-	// FIXME the arguments package currently trivially gathers variable related
-	// arguments in a heterogeneous slice, in order to minimize the number of
-	// code paths gathering variables during the transition to this structure.
-	// Once all commands that gather variables have been converted to this
-	// structure, we could move the variable gathering code to the arguments
-	// package directly, removing this shim layer.
-
-	varArgs := args.All()
-	items := make([]flags.RawFlag, len(varArgs))
-	for i := range varArgs {
-		items[i].Name = varArgs[i].Name
-		items[i].Value = varArgs[i].Value
-	}
-	c.Meta.variableArgs = flags.RawFlags{Items: &items}
 }

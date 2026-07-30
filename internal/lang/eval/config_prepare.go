@@ -8,11 +8,14 @@ package eval
 import (
 	"context"
 
+	"github.com/hashicorp/hcl/v2"
 	"github.com/zclconf/go-cty/cty"
+	"github.com/zclconf/go-cty/cty/function"
 
 	"github.com/opentofu/opentofu/internal/addrs"
 	"github.com/opentofu/opentofu/internal/lang/eval/internal/configgraph"
 	"github.com/opentofu/opentofu/internal/lang/eval/internal/evalglue"
+	"github.com/opentofu/opentofu/internal/lang/exprs"
 	"github.com/opentofu/opentofu/internal/plans/objchange"
 	"github.com/opentofu/opentofu/internal/tfdiags"
 )
@@ -29,7 +32,8 @@ func (c *ConfigInstance) precheckedModuleInstance(ctx context.Context) (evalglue
 	var diags tfdiags.Diagnostics
 
 	internalGlue := &preparationGlue{
-		providers: c.evalContext.Providers,
+		providers:    c.evalContext.Providers,
+		provisioners: c.evalContext.Provisioners,
 	}
 	rootModuleInstance, moreDiags := c.newRootModuleInstance(ctx, internalGlue)
 	diags = diags.Append(moreDiags)
@@ -52,18 +56,18 @@ type preparationGlue struct {
 	// preparationGlue uses provider schema information to prepare placeholder
 	// "final state" values for resource instances because validation does
 	// not use information from the state.
-	providers ProvidersSchema
+	providers    evalglue.Providers
+	provisioners evalglue.Provisioners
 }
 
-// ValidateProviderConfig implements evalglue.Glue.
-func (v *preparationGlue) ValidateProviderConfig(ctx context.Context, provider addrs.Provider, configVal cty.Value) tfdiags.Diagnostics {
-	// TODO maybe this is why we create validation glue?
-	//return v.providers.ValidateProviderConfig(ctx, provider, configVal)
-	return nil
+// ProviderFunction implements evalglue.Glue.
+func (v *preparationGlue) ProviderFunction(ctx context.Context, provider addrs.Provider, providerInst exprs.FromValue[*configgraph.ProviderInstance], pf addrs.ProviderFunction, rng hcl.Range) (function.Function, tfdiags.Diagnostics) {
+	_, isConfigured := providerInst.ValueOk()
+	return v.providers.BuildFunction(ctx, provider, pf, isConfigured, rng)
 }
 
 // ResourceInstanceValue implements evaluationGlue.
-func (v *preparationGlue) ResourceInstanceValue(ctx context.Context, ri *configgraph.ResourceInstance, configVal cty.Value, _ configgraph.Maybe[*configgraph.ProviderInstance], _ addrs.Set[addrs.AbsResourceInstance]) (cty.Value, tfdiags.Diagnostics) {
+func (v *preparationGlue) ResourceInstanceValue(ctx context.Context, ri *configgraph.ResourceInstance, configVal cty.Value, _ exprs.FromValue[*configgraph.ProviderInstance], _ addrs.Set[addrs.AbsResourceInstance]) (cty.Value, tfdiags.Diagnostics) {
 	schema, diags := v.providers.ResourceTypeSchema(ctx,
 		ri.Provider,
 		ri.Addr.Resource.Resource.Mode,
@@ -75,13 +79,13 @@ func (v *preparationGlue) ResourceInstanceValue(ctx context.Context, ri *configg
 		return cty.DynamicVal, diags
 	}
 
-	/* TODO maybe this is why we create validation glue?
-	validateDiags := v.providers.ValidateResourceConfig(ctx, ri.Provider, ri.Addr.Resource.Resource.Mode, ri.Addr.Resource.Resource.Type, configVal)
+	configValUnmarked, _ := configVal.UnmarkDeep()
+	validateDiags := v.providers.ValidateResourceConfig(ctx, ri.Provider, ri.Addr.Resource.Resource.Mode, ri.Addr.Resource.Resource.Type, configValUnmarked)
 	diags = diags.Append(validateDiags)
 	if diags.HasErrors() {
 		// Provider indicated an invalid resource configuration
 		return cty.DynamicVal, diags
-	}*/
+	}
 
 	// FIXME: If we have a managed or data resource instance, as opposed to
 	// an ephemeral resource instance, then we should check to make sure
@@ -99,7 +103,27 @@ func (v *preparationGlue) ResourceInstanceValue(ctx context.Context, ri *configg
 	// it's not competing with other expensive work like performing transitive
 	// reduction on a dag, etc. The main problem seems to be that it allocates
 	// a _lot_ of temporary objects, and so there's lots of GC pressure.
-	return objchange.ProposedNew(
-		schema.Block, cty.NullVal(schema.Block.ImpliedType()), configVal,
-	), diags
+	proposed := objchange.ProposedNew(
+		schema.Block, cty.UnknownVal(schema.Block.ImpliedType()), configVal,
+	)
+
+	// Handle provisioners validate
+	for _, prov := range ri.CreateProvisioners {
+		cfg, cfgDiags := prov.Config(ctx, proposed)
+		diags = diags.Append(cfgDiags)
+		if cfgDiags.HasErrors() {
+			continue
+		}
+
+		cfgUnmarked, _ := cfg.Value.UnmarkDeep()
+
+		valDiags := v.provisioners.ValidateProvisionerConfig(ctx, prov.Type, cfgUnmarked)
+		diags = diags.Append(valDiags)
+		if valDiags.HasErrors() {
+			continue
+		}
+	}
+	// TODO validate destroy provisioners
+
+	return proposed, diags
 }

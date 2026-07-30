@@ -11,10 +11,14 @@ import (
 
 // Get represents the command-line arguments for the get command.
 type Get struct {
-	Update         bool
+	// Update is the flag that can be used to upgrade the version of the modules.
+	Update bool
+	// TestsDirectory indicates the path where the tests are stored
 	TestsDirectory string
 
-	Vars        *Vars
+	// Vars holds and provides information for the flags related to variables that a user can give into the process
+	Vars *Vars
+	// ViewOptions specifies which view options to use
 	ViewOptions ViewOptions
 }
 
@@ -27,7 +31,7 @@ func ParseGet(args []string) (*Get, func(), tfdiags.Diagnostics) {
 		Vars: &Vars{},
 	}
 
-	cmdFlags := extendedFlagSet("get", nil, nil, arguments.Vars)
+	cmdFlags := extendedFlagSet("get", nil, arguments.Vars)
 	cmdFlags.BoolVar(&arguments.Update, "update", false, "update")
 	cmdFlags.StringVar(&arguments.TestsDirectory, "test-directory", "tests", "test-directory")
 	arguments.ViewOptions.AddFlags(cmdFlags, false)

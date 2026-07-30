@@ -23,6 +23,14 @@ import (
 // command/views/json package.
 const JSON_UI_VERSION = "1.2"
 
+// NewJSONView creates a new JSONView that wraps the logger configured for the JSON output.
+// This method is meant to be called only from the views that are root level, meaning that
+// are created for the invoked OpenTofu command.
+// The other utilitary views (eg: Backend, StateLocker, jsonHook, etc) needs to get JSONView
+// from a root level view. That's because when this method is called, it prints a log entry
+// with the OpenTofu version. By invoking this method multiple times in a run, will produce
+// multiple version log entries, which might disrupt any other external parsing tool that
+// might rely on the machine readable output.
 func NewJSONView(view *View, out *os.File) *JSONView {
 	if out == nil {
 		out = view.streams.Stdout.File
@@ -78,12 +86,12 @@ func (v *JSONView) StateDump(state string) {
 	)
 }
 
-func (v *JSONView) Diagnostics(diags tfdiags.Diagnostics, metadata ...interface{}) {
+func (v *JSONView) Diagnostics(diags tfdiags.Diagnostics, metadata ...any) {
 	sources := v.view.configSources()
 	for _, diag := range diags {
 		diagnostic := jsonentities.NewDiagnostic(diag, sources)
 
-		args := []interface{}{"type", json.MessageDiagnostic, "diagnostic", diagnostic}
+		args := []any{"type", json.MessageDiagnostic, "diagnostic", diagnostic}
 		args = append(args, metadata...)
 
 		switch diag.Severity() {
