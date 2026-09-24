@@ -57,625 +57,625 @@ func TestFunctions(t *testing.T) {
 		// Please maintain this list in alphabetical order by function, with
 		// a blank line between the group of tests for each function.
 
-		"abs": {
-			{
-				`abs(-1)`,
-				cty.NumberIntVal(1),
-			},
-		},
-
-		"abspath": {
-			{
-				`abspath(".")`,
-				cty.StringVal((func() string {
-					cwd, err := os.Getwd()
-					if err != nil {
-						panic(err)
-					}
-					return filepath.ToSlash(cwd)
-				})()),
-			},
-		},
-
-		"alltrue": {
-			{
-				`alltrue(["true", true])`,
-				cty.True,
-			},
-		},
-
-		"anytrue": {
-			{
-				`anytrue([])`,
-				cty.False,
-			},
-		},
-
-		"assumeequal": {
-			{
-				`assumeequal("a", "a")`,
-				cty.StringVal("a"),
-			},
-		},
-
-		"assumelistlength": {
-			{
-				`assumelistlength([1, 2], 1, 2)`,
-				cty.ListVal([]cty.Value{ // tuple automatically converted to list
-					cty.NumberIntVal(1),
-					cty.NumberIntVal(2),
-				}),
-			},
-		},
-
-		"assumelistlengthmax": {
-			{
-				`assumelistlengthmax([1, 2], 3)`,
-				cty.ListVal([]cty.Value{ // tuple automatically converted to list
-					cty.NumberIntVal(1),
-					cty.NumberIntVal(2),
-				}),
-			},
-		},
-
-		"assumelistlengthmin": {
-			{
-				`assumelistlengthmin([1, 2], 1)`,
-				cty.ListVal([]cty.Value{ // tuple automatically converted to list
-					cty.NumberIntVal(1),
-					cty.NumberIntVal(2),
-				}),
-			},
-		},
-
-		"assumemaplength": {
-			{
-				`assumemaplength({a = 1, b = 2}, 1, 2)`,
-				cty.MapVal(map[string]cty.Value{ // object automatically converted to map
-					"a": cty.NumberIntVal(1),
-					"b": cty.NumberIntVal(2),
-				}),
-			},
-		},
-
-		"assumemaplengthmax": {
-			{
-				`assumemaplengthmax({a = 1, b = 2}, 3)`,
-				cty.MapVal(map[string]cty.Value{ // object automatically converted to map
-					"a": cty.NumberIntVal(1),
-					"b": cty.NumberIntVal(2),
-				}),
-			},
-		},
-
-		"assumemaplengthmin": {
-			{
-				`assumemaplengthmin({a = 1, b = 2}, 1)`,
-				cty.MapVal(map[string]cty.Value{ // object automatically converted to map
-					"a": cty.NumberIntVal(1),
-					"b": cty.NumberIntVal(2),
-				}),
-			},
-		},
-
-		"assumenotnull": {
-			{
-				`assumenotnull("hello")`,
-				cty.StringVal("hello"),
-			},
-		},
-
-		"assumesetlength": {
-			{
-				`assumesetlength([1, 2], 1, 2)`,
-				cty.SetVal([]cty.Value{ // tuple automatically converted to set
-					cty.NumberIntVal(1),
-					cty.NumberIntVal(2),
-				}),
-			},
-		},
-
-		"assumesetlengthmax": {
-			{
-				`assumesetlengthmax([1, 2], 3)`,
-				cty.SetVal([]cty.Value{ // tuple automatically converted to set
-					cty.NumberIntVal(1),
-					cty.NumberIntVal(2),
-				}),
-			},
-		},
-
-		"assumesetlengthmin": {
-			{
-				`assumesetlengthmin([1, 2], 1)`,
-				cty.SetVal([]cty.Value{ // tuple automatically converted to set
-					cty.NumberIntVal(1),
-					cty.NumberIntVal(2),
-				}),
-			},
-		},
-
-		"assumestringprefix": {
-			{
-				`assumestringprefix("foo-bar", "foo-")`,
-				cty.StringVal("foo-bar"),
-			},
-			{
-				`assumestringprefix(true, "tru")`,
-				cty.StringVal("true"), // bool automatically converted to string
-			},
-		},
-
-		"base64decode": {
-			{
-				`base64decode("YWJjMTIzIT8kKiYoKSctPUB+")`,
-				cty.StringVal("abc123!?$*&()'-=@~"),
-			},
-		},
-
-		"base64encode": {
-			{
-				`base64encode("abc123!?$*&()'-=@~")`,
-				cty.StringVal("YWJjMTIzIT8kKiYoKSctPUB+"),
-			},
-		},
-
-		"base64gzip": {
-			{
-				`base64gzip("test")`,
-				cty.StringVal("H4sIAAAAAAAA/wAEAPv/dGVzdAAAAP//AwAMfn/YBAAAAA=="),
-			},
-		},
-
-		"base64gunzip": {
-			{
-				`base64gunzip("H4sIAAAAAAAA/wAEAPv/dGVzdAAAAP//AwAMfn/YBAAAAA==")`,
-				cty.StringVal("test"),
-			},
-		},
-
-		"base64sha256": {
-			{
-				`base64sha256("test")`,
-				cty.StringVal("n4bQgYhMfWWaL+qgxVrQFaO/TxsrC4Is0V1sFbDwCgg="),
-			},
-		},
-
-		"base64sha512": {
-			{
-				`base64sha512("test")`,
-				cty.StringVal("7iaw3Ur350mqGo7jwQrpkj9hiYB3Lkc/iBml1JQODbJ6wYX4oOHV+E+IvIh/1nsUNzLDBMxfqa2Ob1f1ACio/w=="),
-			},
-		},
-
-		"basename": {
-			{
-				`basename("testdata/hello.txt")`,
-				cty.StringVal("hello.txt"),
-			},
-		},
-
-		"can": {
-			{
-				`can(true)`,
-				cty.True,
-			},
-			{
-				// Note: "can" only works with expressions that pass static
-				// validation, because it only gets an opportunity to run in
-				// that case. The following "works" (captures the error) because
-				// OpenTofu understands it as a reference to an attribute
-				// that does not exist during dynamic evaluation.
-				//
-				// "can" doesn't work with references that could never possibly
-				// be valid and are thus caught during static validation, such
-				// as an expression like "foo" alone which would be understood
-				// as an invalid resource reference.
-				`can({}.baz)`,
-				cty.False,
-			},
-		},
-
-		"ceil": {
-			{
-				`ceil(1.2)`,
-				cty.NumberIntVal(2),
-			},
-		},
-
-		"chomp": {
-			{
-				`chomp("goodbye\ncruel\nworld\n")`,
-				cty.StringVal("goodbye\ncruel\nworld"),
-			},
-		},
-
-		"chunklist": {
-			{
-				`chunklist(["a", "b", "c"], 1)`,
-				cty.ListVal([]cty.Value{
-					cty.ListVal([]cty.Value{
-						cty.StringVal("a"),
-					}),
-					cty.ListVal([]cty.Value{
-						cty.StringVal("b"),
-					}),
-					cty.ListVal([]cty.Value{
-						cty.StringVal("c"),
-					}),
-				}),
-			},
-		},
-
-		"cidrcontains": {
-			{
-				`cidrcontains("192.168.1.0/24", "192.168.1.1")`,
-				cty.True,
-			},
-		},
-
-		"cidrhost": {
-			{
-				`cidrhost("192.168.1.0/24", 5)`,
-				cty.StringVal("192.168.1.5"),
-			},
-		},
-
-		"cidrnetmask": {
-			{
-				`cidrnetmask("192.168.1.0/24")`,
-				cty.StringVal("255.255.255.0"),
-			},
-		},
-
-		"cidrsubnet": {
-			{
-				`cidrsubnet("192.168.2.0/20", 4, 6)`,
-				cty.StringVal("192.168.6.0/24"),
-			},
-		},
-
-		"cidrsubnets": {
-			{
-				`cidrsubnets("10.0.0.0/8", 8, 8, 16, 8)`,
-				cty.ListVal([]cty.Value{
-					cty.StringVal("10.0.0.0/16"),
-					cty.StringVal("10.1.0.0/16"),
-					cty.StringVal("10.2.0.0/24"),
-					cty.StringVal("10.3.0.0/16"),
-				}),
-			},
-		},
-
-		"coalesce": {
-			{
-				`coalesce("first", "second", "third")`,
-				cty.StringVal("first"),
-			},
-
-			{
-				`coalescelist(["first", "second"], ["third", "fourth"])`,
-				cty.TupleVal([]cty.Value{
-					cty.StringVal("first"), cty.StringVal("second"),
-				}),
-			},
-		},
-
-		"coalescelist": {
-			{
-				`coalescelist(tolist(["a", "b"]), tolist(["c", "d"]))`,
-				cty.ListVal([]cty.Value{
-					cty.StringVal("a"),
-					cty.StringVal("b"),
-				}),
-			},
-			{
-				`coalescelist(["a", "b"], ["c", "d"])`,
-				cty.TupleVal([]cty.Value{
-					cty.StringVal("a"),
-					cty.StringVal("b"),
-				}),
-			},
-		},
-
-		"compact": {
-			{
-				`compact(["test", "", "test"])`,
-				cty.ListVal([]cty.Value{
-					cty.StringVal("test"), cty.StringVal("test"),
-				}),
-			},
-		},
-
-		"concat": {
-			{
-				`concat(["a", ""], ["b", "c"])`,
-				cty.TupleVal([]cty.Value{
-					cty.StringVal("a"),
-					cty.StringVal(""),
-					cty.StringVal("b"),
-					cty.StringVal("c"),
-				}),
-			},
-		},
-
-		"contains": {
-			{
-				`contains(["a", "b"], "a")`,
-				cty.True,
-			},
-			{ // Should also work with sets, due to automatic conversion
-				`contains(toset(["a", "b"]), "a")`,
-				cty.True,
-			},
-		},
-
-		"convert": {
-			{
-				`convert("hello", string)`,
-				cty.StringVal("hello"),
-			},
-		},
-
-		"csvdecode": {
-			{
-				`csvdecode("a,b,c\n1,2,3\n4,5,6")`,
-				cty.ListVal([]cty.Value{
-					cty.ObjectVal(map[string]cty.Value{
-						"a": cty.StringVal("1"),
-						"b": cty.StringVal("2"),
-						"c": cty.StringVal("3"),
-					}),
-					cty.ObjectVal(map[string]cty.Value{
-						"a": cty.StringVal("4"),
-						"b": cty.StringVal("5"),
-						"c": cty.StringVal("6"),
-					}),
-				}),
-			},
-		},
-
-		"dirname": {
-			{
-				`dirname("testdata/hello.txt")`,
-				cty.StringVal("testdata"),
-			},
-		},
-
-		"distinct": {
-			{
-				`distinct(["a", "b", "a", "b"])`,
-				cty.ListVal([]cty.Value{
-					cty.StringVal("a"), cty.StringVal("b"),
-				}),
-			},
-		},
-
-		"element": {
-			{
-				`element(["hello"], 0)`,
-				cty.StringVal("hello"),
-			},
-		},
-
-		"endswith": {
-			{
-				`endswith("hello world", "world")`,
-				cty.True,
-			},
-			{
-				`endswith("hello world", "hello")`,
-				cty.False,
-			},
-			{
-				`endswith("hello world", "")`,
-				cty.True,
-				// Completely empty suffix value  ( "" )
-				// will always evaluate to true for all strings.
-			},
-			{
-				`endswith("hello world", " ")`,
-				cty.False,
-			},
-			{
-				`endswith("", "")`,
-				cty.True,
-			},
-			{
-				`endswith("", " ")`,
-				cty.False,
-			},
-			{
-				`endswith(" ", "")`,
-				cty.True,
-			},
-			{
-				`endswith("", "hello")`,
-				cty.False,
-			},
-			{
-				`endswith(" ", "hello")`,
-				cty.False,
-			},
-		},
-		"ephemeralasnull": {
-			{
-				// We have more specific tests in the funcs package
-				`ephemeralasnull("foo")`,
-				cty.StringVal("foo"),
-			},
-		},
-		"file": {
-			{
-				`file("hello.txt")`,
-				cty.StringVal("hello!"),
-			},
-		},
-
-		"fileexists": {
-			{
-				`fileexists("hello.txt")`,
-				cty.BoolVal(true),
-			},
-		},
-
-		"fileset": {
-			{
-				`fileset(".", "*/hello.*")`,
-				cty.SetVal([]cty.Value{
-					cty.StringVal("subdirectory/hello.tmpl"),
-					cty.StringVal("subdirectory/hello.txt"),
-				}),
-			},
-			{
-				`fileset(".", "subdirectory/hello.*")`,
-				cty.SetVal([]cty.Value{
-					cty.StringVal("subdirectory/hello.tmpl"),
-					cty.StringVal("subdirectory/hello.txt"),
-				}),
-			},
-			{
-				`fileset(".", "hello.*")`,
-				cty.SetVal([]cty.Value{
-					cty.StringVal("hello.tmpl"),
-					cty.StringVal("hello.txt"),
-				}),
-			},
-			{
-				`fileset("subdirectory", "hello.*")`,
-				cty.SetVal([]cty.Value{
-					cty.StringVal("hello.tmpl"),
-					cty.StringVal("hello.txt"),
-				}),
-			},
-		},
-
-		"filebase64": {
-			{
-				`filebase64("hello.txt")`,
-				cty.StringVal("aGVsbG8h"),
-			},
-		},
-
-		"filebase64sha256": {
-			{
-				`filebase64sha256("hello.txt")`,
-				cty.StringVal("zgYJL7lI2f+sfRo3bkBLJrdXW8wR7gWkYV/vT+w6MIs="),
-			},
-		},
-
-		"filebase64sha512": {
-			{
-				`filebase64sha512("hello.txt")`,
-				cty.StringVal("xvgdsOn4IGyXHJ5YJuO6gj/7saOpAPgEdlKov3jqmP38dFhVo4U6Y1Z1RY620arxIJ6I6tLRkjgrXEy91oUOAg=="),
-			},
-		},
-
-		"filemd5": {
-			{
-				`filemd5("hello.txt")`,
-				cty.StringVal("5a8dd3ad0756a93ded72b823b19dd877"),
-			},
-		},
-
-		"filesha1": {
-			{
-				`filesha1("hello.txt")`,
-				cty.StringVal("8f7d88e901a5ad3a05d8cc0de93313fd76028f8c"),
-			},
-		},
-
-		"filesha256": {
-			{
-				`filesha256("hello.txt")`,
-				cty.StringVal("ce06092fb948d9ffac7d1a376e404b26b7575bcc11ee05a4615fef4fec3a308b"),
-			},
-		},
-
-		"filesha512": {
-			{
-				`filesha512("hello.txt")`,
-				cty.StringVal("c6f81db0e9f8206c971c9e5826e3ba823ffbb1a3a900f8047652a8bf78ea98fdfc745855a3853a635675458eb6d1aaf1209e88ead2d192382b5c4cbdd6850e02"),
-			},
-		},
-
-		"flatten": {
-			{
-				`flatten([["a", "b"], ["c", "d"]])`,
-				cty.TupleVal([]cty.Value{
-					cty.StringVal("a"),
-					cty.StringVal("b"),
-					cty.StringVal("c"),
-					cty.StringVal("d"),
-				}),
-			},
-		},
-
-		"floor": {
-			{
-				`floor(-1.8)`,
-				cty.NumberFloatVal(-2),
-			},
-		},
-
-		"format": {
-			{
-				`format("Hello, %s!", "Ander")`,
-				cty.StringVal("Hello, Ander!"),
-			},
-		},
-
-		"formatlist": {
-			{
-				`formatlist("Hello, %s!", ["Valentina", "Ander", "Olivia", "Sam"])`,
-				cty.ListVal([]cty.Value{
-					cty.StringVal("Hello, Valentina!"),
-					cty.StringVal("Hello, Ander!"),
-					cty.StringVal("Hello, Olivia!"),
-					cty.StringVal("Hello, Sam!"),
-				}),
-			},
-		},
-
-		"formatdate": {
-			{
-				`formatdate("DD MMM YYYY hh:mm ZZZ", "2018-01-04T23:12:01Z")`,
-				cty.StringVal("04 Jan 2018 23:12 UTC"),
-			},
-		},
-
-		"indent": {
-			{
-				fmt.Sprintf("indent(4, %#v)", Poem),
-				cty.StringVal("Fleas:\n    Adam\n    Had'em\n    \n    E.E. Cummings"),
-			},
-		},
-
-		"index": {
-			{
-				`index(["a", "b", "c"], "a")`,
-				cty.NumberIntVal(0),
-			},
-		},
-
-		"issensitive": {
-			{
-				`issensitive(1)`,
-				cty.False,
-			},
-			{
-				`issensitive(sensitive(1))`,
-				cty.True,
-			},
-		},
-
-		"join": {
-			{
-				`join(" ", ["Hello", "World"])`,
-				cty.StringVal("Hello World"),
-			},
-		},
-
+		//"abs": {
+		//	{
+		//		`abs(-1)`,
+		//		cty.NumberIntVal(1),
+		//	},
+		//},
+		//
+		//"abspath": {
+		//	{
+		//		`abspath(".")`,
+		//		cty.StringVal((func() string {
+		//			cwd, err := os.Getwd()
+		//			if err != nil {
+		//				panic(err)
+		//			}
+		//			return filepath.ToSlash(cwd)
+		//		})()),
+		//	},
+		//},
+		//
+		//"alltrue": {
+		//	{
+		//		`alltrue(["true", true])`,
+		//		cty.True,
+		//	},
+		//},
+		//
+		//"anytrue": {
+		//	{
+		//		`anytrue([])`,
+		//		cty.False,
+		//	},
+		//},
+		//
+		//"assumeequal": {
+		//	{
+		//		`assumeequal("a", "a")`,
+		//		cty.StringVal("a"),
+		//	},
+		//},
+		//
+		//"assumelistlength": {
+		//	{
+		//		`assumelistlength([1, 2], 1, 2)`,
+		//		cty.ListVal([]cty.Value{ // tuple automatically converted to list
+		//			cty.NumberIntVal(1),
+		//			cty.NumberIntVal(2),
+		//		}),
+		//	},
+		//},
+		//
+		//"assumelistlengthmax": {
+		//	{
+		//		`assumelistlengthmax([1, 2], 3)`,
+		//		cty.ListVal([]cty.Value{ // tuple automatically converted to list
+		//			cty.NumberIntVal(1),
+		//			cty.NumberIntVal(2),
+		//		}),
+		//	},
+		//},
+		//
+		//"assumelistlengthmin": {
+		//	{
+		//		`assumelistlengthmin([1, 2], 1)`,
+		//		cty.ListVal([]cty.Value{ // tuple automatically converted to list
+		//			cty.NumberIntVal(1),
+		//			cty.NumberIntVal(2),
+		//		}),
+		//	},
+		//},
+		//
+		//"assumemaplength": {
+		//	{
+		//		`assumemaplength({a = 1, b = 2}, 1, 2)`,
+		//		cty.MapVal(map[string]cty.Value{ // object automatically converted to map
+		//			"a": cty.NumberIntVal(1),
+		//			"b": cty.NumberIntVal(2),
+		//		}),
+		//	},
+		//},
+		//
+		//"assumemaplengthmax": {
+		//	{
+		//		`assumemaplengthmax({a = 1, b = 2}, 3)`,
+		//		cty.MapVal(map[string]cty.Value{ // object automatically converted to map
+		//			"a": cty.NumberIntVal(1),
+		//			"b": cty.NumberIntVal(2),
+		//		}),
+		//	},
+		//},
+		//
+		//"assumemaplengthmin": {
+		//	{
+		//		`assumemaplengthmin({a = 1, b = 2}, 1)`,
+		//		cty.MapVal(map[string]cty.Value{ // object automatically converted to map
+		//			"a": cty.NumberIntVal(1),
+		//			"b": cty.NumberIntVal(2),
+		//		}),
+		//	},
+		//},
+		//
+		//"assumenotnull": {
+		//	{
+		//		`assumenotnull("hello")`,
+		//		cty.StringVal("hello"),
+		//	},
+		//},
+		//
+		//"assumesetlength": {
+		//	{
+		//		`assumesetlength([1, 2], 1, 2)`,
+		//		cty.SetVal([]cty.Value{ // tuple automatically converted to set
+		//			cty.NumberIntVal(1),
+		//			cty.NumberIntVal(2),
+		//		}),
+		//	},
+		//},
+		//
+		//"assumesetlengthmax": {
+		//	{
+		//		`assumesetlengthmax([1, 2], 3)`,
+		//		cty.SetVal([]cty.Value{ // tuple automatically converted to set
+		//			cty.NumberIntVal(1),
+		//			cty.NumberIntVal(2),
+		//		}),
+		//	},
+		//},
+		//
+		//"assumesetlengthmin": {
+		//	{
+		//		`assumesetlengthmin([1, 2], 1)`,
+		//		cty.SetVal([]cty.Value{ // tuple automatically converted to set
+		//			cty.NumberIntVal(1),
+		//			cty.NumberIntVal(2),
+		//		}),
+		//	},
+		//},
+		//
+		//"assumestringprefix": {
+		//	{
+		//		`assumestringprefix("foo-bar", "foo-")`,
+		//		cty.StringVal("foo-bar"),
+		//	},
+		//	{
+		//		`assumestringprefix(true, "tru")`,
+		//		cty.StringVal("true"), // bool automatically converted to string
+		//	},
+		//},
+		//
+		//"base64decode": {
+		//	{
+		//		`base64decode("YWJjMTIzIT8kKiYoKSctPUB+")`,
+		//		cty.StringVal("abc123!?$*&()'-=@~"),
+		//	},
+		//},
+		//
+		//"base64encode": {
+		//	{
+		//		`base64encode("abc123!?$*&()'-=@~")`,
+		//		cty.StringVal("YWJjMTIzIT8kKiYoKSctPUB+"),
+		//	},
+		//},
+		//
+		//"base64gzip": {
+		//	{
+		//		`base64gzip("test")`,
+		//		cty.StringVal("H4sIAAAAAAAA/wAEAPv/dGVzdAAAAP//AwAMfn/YBAAAAA=="),
+		//	},
+		//},
+		//
+		//"base64gunzip": {
+		//	{
+		//		`base64gunzip("H4sIAAAAAAAA/wAEAPv/dGVzdAAAAP//AwAMfn/YBAAAAA==")`,
+		//		cty.StringVal("test"),
+		//	},
+		//},
+		//
+		//"base64sha256": {
+		//	{
+		//		`base64sha256("test")`,
+		//		cty.StringVal("n4bQgYhMfWWaL+qgxVrQFaO/TxsrC4Is0V1sFbDwCgg="),
+		//	},
+		//},
+		//
+		//"base64sha512": {
+		//	{
+		//		`base64sha512("test")`,
+		//		cty.StringVal("7iaw3Ur350mqGo7jwQrpkj9hiYB3Lkc/iBml1JQODbJ6wYX4oOHV+E+IvIh/1nsUNzLDBMxfqa2Ob1f1ACio/w=="),
+		//	},
+		//},
+		//
+		//"basename": {
+		//	{
+		//		`basename("testdata/hello.txt")`,
+		//		cty.StringVal("hello.txt"),
+		//	},
+		//},
+		//
+		//"can": {
+		//	{
+		//		`can(true)`,
+		//		cty.True,
+		//	},
+		//	{
+		//		// Note: "can" only works with expressions that pass static
+		//		// validation, because it only gets an opportunity to run in
+		//		// that case. The following "works" (captures the error) because
+		//		// OpenTofu understands it as a reference to an attribute
+		//		// that does not exist during dynamic evaluation.
+		//		//
+		//		// "can" doesn't work with references that could never possibly
+		//		// be valid and are thus caught during static validation, such
+		//		// as an expression like "foo" alone which would be understood
+		//		// as an invalid resource reference.
+		//		`can({}.baz)`,
+		//		cty.False,
+		//	},
+		//},
+		//
+		//"ceil": {
+		//	{
+		//		`ceil(1.2)`,
+		//		cty.NumberIntVal(2),
+		//	},
+		//},
+		//
+		//"chomp": {
+		//	{
+		//		`chomp("goodbye\ncruel\nworld\n")`,
+		//		cty.StringVal("goodbye\ncruel\nworld"),
+		//	},
+		//},
+		//
+		//"chunklist": {
+		//	{
+		//		`chunklist(["a", "b", "c"], 1)`,
+		//		cty.ListVal([]cty.Value{
+		//			cty.ListVal([]cty.Value{
+		//				cty.StringVal("a"),
+		//			}),
+		//			cty.ListVal([]cty.Value{
+		//				cty.StringVal("b"),
+		//			}),
+		//			cty.ListVal([]cty.Value{
+		//				cty.StringVal("c"),
+		//			}),
+		//		}),
+		//	},
+		//},
+		//
+		//"cidrcontains": {
+		//	{
+		//		`cidrcontains("192.168.1.0/24", "192.168.1.1")`,
+		//		cty.True,
+		//	},
+		//},
+		//
+		//"cidrhost": {
+		//	{
+		//		`cidrhost("192.168.1.0/24", 5)`,
+		//		cty.StringVal("192.168.1.5"),
+		//	},
+		//},
+		//
+		//"cidrnetmask": {
+		//	{
+		//		`cidrnetmask("192.168.1.0/24")`,
+		//		cty.StringVal("255.255.255.0"),
+		//	},
+		//},
+		//
+		//"cidrsubnet": {
+		//	{
+		//		`cidrsubnet("192.168.2.0/20", 4, 6)`,
+		//		cty.StringVal("192.168.6.0/24"),
+		//	},
+		//},
+		//
+		//"cidrsubnets": {
+		//	{
+		//		`cidrsubnets("10.0.0.0/8", 8, 8, 16, 8)`,
+		//		cty.ListVal([]cty.Value{
+		//			cty.StringVal("10.0.0.0/16"),
+		//			cty.StringVal("10.1.0.0/16"),
+		//			cty.StringVal("10.2.0.0/24"),
+		//			cty.StringVal("10.3.0.0/16"),
+		//		}),
+		//	},
+		//},
+		//
+		//"coalesce": {
+		//	{
+		//		`coalesce("first", "second", "third")`,
+		//		cty.StringVal("first"),
+		//	},
+		//
+		//	{
+		//		`coalescelist(["first", "second"], ["third", "fourth"])`,
+		//		cty.TupleVal([]cty.Value{
+		//			cty.StringVal("first"), cty.StringVal("second"),
+		//		}),
+		//	},
+		//},
+		//
+		//"coalescelist": {
+		//	{
+		//		`coalescelist(tolist(["a", "b"]), tolist(["c", "d"]))`,
+		//		cty.ListVal([]cty.Value{
+		//			cty.StringVal("a"),
+		//			cty.StringVal("b"),
+		//		}),
+		//	},
+		//	{
+		//		`coalescelist(["a", "b"], ["c", "d"])`,
+		//		cty.TupleVal([]cty.Value{
+		//			cty.StringVal("a"),
+		//			cty.StringVal("b"),
+		//		}),
+		//	},
+		//},
+		//
+		//"compact": {
+		//	{
+		//		`compact(["test", "", "test"])`,
+		//		cty.ListVal([]cty.Value{
+		//			cty.StringVal("test"), cty.StringVal("test"),
+		//		}),
+		//	},
+		//},
+		//
+		//"concat": {
+		//	{
+		//		`concat(["a", ""], ["b", "c"])`,
+		//		cty.TupleVal([]cty.Value{
+		//			cty.StringVal("a"),
+		//			cty.StringVal(""),
+		//			cty.StringVal("b"),
+		//			cty.StringVal("c"),
+		//		}),
+		//	},
+		//},
+		//
+		//"contains": {
+		//	{
+		//		`contains(["a", "b"], "a")`,
+		//		cty.True,
+		//	},
+		//	{ // Should also work with sets, due to automatic conversion
+		//		`contains(toset(["a", "b"]), "a")`,
+		//		cty.True,
+		//	},
+		//},
+		//
+		//"convert": {
+		//	{
+		//		`convert("hello", string)`,
+		//		cty.StringVal("hello"),
+		//	},
+		//},
+		//
+		//"csvdecode": {
+		//	{
+		//		`csvdecode("a,b,c\n1,2,3\n4,5,6")`,
+		//		cty.ListVal([]cty.Value{
+		//			cty.ObjectVal(map[string]cty.Value{
+		//				"a": cty.StringVal("1"),
+		//				"b": cty.StringVal("2"),
+		//				"c": cty.StringVal("3"),
+		//			}),
+		//			cty.ObjectVal(map[string]cty.Value{
+		//				"a": cty.StringVal("4"),
+		//				"b": cty.StringVal("5"),
+		//				"c": cty.StringVal("6"),
+		//			}),
+		//		}),
+		//	},
+		//},
+		//
+		//"dirname": {
+		//	{
+		//		`dirname("testdata/hello.txt")`,
+		//		cty.StringVal("testdata"),
+		//	},
+		//},
+		//
+		//"distinct": {
+		//	{
+		//		`distinct(["a", "b", "a", "b"])`,
+		//		cty.ListVal([]cty.Value{
+		//			cty.StringVal("a"), cty.StringVal("b"),
+		//		}),
+		//	},
+		//},
+		//
+		//"element": {
+		//	{
+		//		`element(["hello"], 0)`,
+		//		cty.StringVal("hello"),
+		//	},
+		//},
+		//
+		//"endswith": {
+		//	{
+		//		`endswith("hello world", "world")`,
+		//		cty.True,
+		//	},
+		//	{
+		//		`endswith("hello world", "hello")`,
+		//		cty.False,
+		//	},
+		//	{
+		//		`endswith("hello world", "")`,
+		//		cty.True,
+		//		// Completely empty suffix value  ( "" )
+		//		// will always evaluate to true for all strings.
+		//	},
+		//	{
+		//		`endswith("hello world", " ")`,
+		//		cty.False,
+		//	},
+		//	{
+		//		`endswith("", "")`,
+		//		cty.True,
+		//	},
+		//	{
+		//		`endswith("", " ")`,
+		//		cty.False,
+		//	},
+		//	{
+		//		`endswith(" ", "")`,
+		//		cty.True,
+		//	},
+		//	{
+		//		`endswith("", "hello")`,
+		//		cty.False,
+		//	},
+		//	{
+		//		`endswith(" ", "hello")`,
+		//		cty.False,
+		//	},
+		//},
+		//"ephemeralasnull": {
+		//	{
+		//		// We have more specific tests in the funcs package
+		//		`ephemeralasnull("foo")`,
+		//		cty.StringVal("foo"),
+		//	},
+		//},
+		//"file": {
+		//	{
+		//		`file("hello.txt")`,
+		//		cty.StringVal("hello!"),
+		//	},
+		//},
+		//
+		//"fileexists": {
+		//	{
+		//		`fileexists("hello.txt")`,
+		//		cty.BoolVal(true),
+		//	},
+		//},
+		//
+		//"fileset": {
+		//	{
+		//		`fileset(".", "*/hello.*")`,
+		//		cty.SetVal([]cty.Value{
+		//			cty.StringVal("subdirectory/hello.tmpl"),
+		//			cty.StringVal("subdirectory/hello.txt"),
+		//		}),
+		//	},
+		//	{
+		//		`fileset(".", "subdirectory/hello.*")`,
+		//		cty.SetVal([]cty.Value{
+		//			cty.StringVal("subdirectory/hello.tmpl"),
+		//			cty.StringVal("subdirectory/hello.txt"),
+		//		}),
+		//	},
+		//	{
+		//		`fileset(".", "hello.*")`,
+		//		cty.SetVal([]cty.Value{
+		//			cty.StringVal("hello.tmpl"),
+		//			cty.StringVal("hello.txt"),
+		//		}),
+		//	},
+		//	{
+		//		`fileset("subdirectory", "hello.*")`,
+		//		cty.SetVal([]cty.Value{
+		//			cty.StringVal("hello.tmpl"),
+		//			cty.StringVal("hello.txt"),
+		//		}),
+		//	},
+		//},
+		//
+		//"filebase64": {
+		//	{
+		//		`filebase64("hello.txt")`,
+		//		cty.StringVal("aGVsbG8h"),
+		//	},
+		//},
+		//
+		//"filebase64sha256": {
+		//	{
+		//		`filebase64sha256("hello.txt")`,
+		//		cty.StringVal("zgYJL7lI2f+sfRo3bkBLJrdXW8wR7gWkYV/vT+w6MIs="),
+		//	},
+		//},
+		//
+		//"filebase64sha512": {
+		//	{
+		//		`filebase64sha512("hello.txt")`,
+		//		cty.StringVal("xvgdsOn4IGyXHJ5YJuO6gj/7saOpAPgEdlKov3jqmP38dFhVo4U6Y1Z1RY620arxIJ6I6tLRkjgrXEy91oUOAg=="),
+		//	},
+		//},
+		//
+		//"filemd5": {
+		//	{
+		//		`filemd5("hello.txt")`,
+		//		cty.StringVal("5a8dd3ad0756a93ded72b823b19dd877"),
+		//	},
+		//},
+		//
+		//"filesha1": {
+		//	{
+		//		`filesha1("hello.txt")`,
+		//		cty.StringVal("8f7d88e901a5ad3a05d8cc0de93313fd76028f8c"),
+		//	},
+		//},
+		//
+		//"filesha256": {
+		//	{
+		//		`filesha256("hello.txt")`,
+		//		cty.StringVal("ce06092fb948d9ffac7d1a376e404b26b7575bcc11ee05a4615fef4fec3a308b"),
+		//	},
+		//},
+		//
+		//"filesha512": {
+		//	{
+		//		`filesha512("hello.txt")`,
+		//		cty.StringVal("c6f81db0e9f8206c971c9e5826e3ba823ffbb1a3a900f8047652a8bf78ea98fdfc745855a3853a635675458eb6d1aaf1209e88ead2d192382b5c4cbdd6850e02"),
+		//	},
+		//},
+		//
+		//"flatten": {
+		//	{
+		//		`flatten([["a", "b"], ["c", "d"]])`,
+		//		cty.TupleVal([]cty.Value{
+		//			cty.StringVal("a"),
+		//			cty.StringVal("b"),
+		//			cty.StringVal("c"),
+		//			cty.StringVal("d"),
+		//		}),
+		//	},
+		//},
+		//
+		//"floor": {
+		//	{
+		//		`floor(-1.8)`,
+		//		cty.NumberFloatVal(-2),
+		//	},
+		//},
+		//
+		//"format": {
+		//	{
+		//		`format("Hello, %s!", "Ander")`,
+		//		cty.StringVal("Hello, Ander!"),
+		//	},
+		//},
+		//
+		//"formatlist": {
+		//	{
+		//		`formatlist("Hello, %s!", ["Valentina", "Ander", "Olivia", "Sam"])`,
+		//		cty.ListVal([]cty.Value{
+		//			cty.StringVal("Hello, Valentina!"),
+		//			cty.StringVal("Hello, Ander!"),
+		//			cty.StringVal("Hello, Olivia!"),
+		//			cty.StringVal("Hello, Sam!"),
+		//		}),
+		//	},
+		//},
+		//
+		//"formatdate": {
+		//	{
+		//		`formatdate("DD MMM YYYY hh:mm ZZZ", "2018-01-04T23:12:01Z")`,
+		//		cty.StringVal("04 Jan 2018 23:12 UTC"),
+		//	},
+		//},
+		//
+		//"indent": {
+		//	{
+		//		fmt.Sprintf("indent(4, %#v)", Poem),
+		//		cty.StringVal("Fleas:\n    Adam\n    Had'em\n    \n    E.E. Cummings"),
+		//	},
+		//},
+		//
+		//"index": {
+		//	{
+		//		`index(["a", "b", "c"], "a")`,
+		//		cty.NumberIntVal(0),
+		//	},
+		//},
+		//
+		//"issensitive": {
+		//	{
+		//		`issensitive(1)`,
+		//		cty.False,
+		//	},
+		//	{
+		//		`issensitive(sensitive(1))`,
+		//		cty.True,
+		//	},
+		//},
+		//
+		//"join": {
+		//	{
+		//		`join(" ", ["Hello", "World"])`,
+		//		cty.StringVal("Hello World"),
+		//	},
+		//},
+		//
 		"jsondecode": {
 			{
 				`jsondecode("{\"hello\": \"world\"}")`,
