@@ -28,14 +28,15 @@ func TestWorkspaceViews(t *testing.T) {
 			wantJson: []map[string]any{
 				{
 					"@level":   "error",
-					"@message": `Workspace "test-workspace" already exists`,
+					"@message": `Workspace "test-workspace" already exists. Use "tofu workspace select test-workspace" to switch to it`,
 					"@module":  "tofu.ui",
 				},
 			},
 			wantStderr: `
 Error: Workspace "test-workspace" already exists
 
-A workspace having the given name already exists
+A workspace having the given name already exists.
+Use "tofu workspace select test-workspace" to switch to it.
 `,
 		},
 		"workspace_does_not_exist": {
@@ -316,7 +317,7 @@ removed in a future OpenTofu version.
 
 func testWorkspaceHuman(t *testing.T, call func(workspace Workspace), wantStdout, wantStderr string) {
 	view, done := testView(t)
-	workspaceView := NewWorkspace(arguments.ViewOptions{ViewType: arguments.ViewHuman}, view)
+	workspaceView := NewWorkspace(&arguments.View{ViewType: arguments.ViewHuman}, view)
 	call(workspaceView)
 	output := done(t)
 	if diff := cmp.Diff(wantStderr, output.Stderr()); diff != "" {
@@ -329,7 +330,7 @@ func testWorkspaceHuman(t *testing.T, call func(workspace Workspace), wantStdout
 
 func testWorkspaceJson(t *testing.T, call func(workspace Workspace), want []map[string]interface{}) {
 	view, done := testView(t)
-	workspaceView := NewWorkspace(arguments.ViewOptions{ViewType: arguments.ViewJSON}, view)
+	workspaceView := NewWorkspace(&arguments.View{ViewType: arguments.ViewJSON}, view)
 	call(workspaceView)
 	output := done(t)
 	if output.Stderr() != "" {
@@ -345,7 +346,7 @@ func testWorkspaceMulti(t *testing.T, call func(workspace Workspace), wantStdout
 		t.Fatalf("failed to create the file to write json content into: %s", err)
 	}
 	view, done := testView(t)
-	workspaceView := NewWorkspace(arguments.ViewOptions{ViewType: arguments.ViewHuman, JSONInto: jsonInto}, view)
+	workspaceView := NewWorkspace(&arguments.View{ViewType: arguments.ViewHuman, JSONInto: jsonInto}, view)
 	call(workspaceView)
 	{
 		if err := jsonInto.Close(); err != nil {

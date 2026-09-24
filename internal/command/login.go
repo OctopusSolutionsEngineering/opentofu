@@ -17,12 +17,10 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"path/filepath"
 	"strings"
 	"sync"
 
 	tfe "github.com/hashicorp/go-tfe"
-	"github.com/mitchellh/cli"
 	"github.com/opentofu/opentofu/internal/command/arguments"
 	"github.com/opentofu/opentofu/internal/command/views"
 	"github.com/opentofu/opentofu/internal/tracing"
@@ -46,6 +44,25 @@ import (
 // There are a few special circumstances that depend on this whitelisted hostname.
 const hcpTerraformHost = "app.terraform.io"
 
+func LoginCommander() Command {
+	cmd := Command{
+		Name:  "login",
+		Short: "Obtain and save credentials for a remote host",
+		Long: `Retrieves an authentication token for the given hostname, if it supports automatic login, and saves it in a credentials file in your home directory.
+
+If not overridden by credentials helper settings in the CLI configuration, the credentials will be written to the following local file:`,
+
+		DiagsWithNewline: true,
+	}
+
+	args := arguments.BindLogin(&cmd.CommandLine)
+	cmd.Run = func(meta Meta) int {
+		return LoginCommand{meta}.Execute(args, views.NewLogin(args.View, meta.View))
+	}
+
+	return cmd
+}
+
 // LoginCommand is a Command implementation that runs an interactive login
 // flow for a remote service host. It then stashes credentials in a tfrc
 // file in the user's home directory.
@@ -53,38 +70,12 @@ type LoginCommand struct {
 	Meta
 }
 
-// Run implements cli.Command.
-func (c *LoginCommand) Run(rawArgs []string) int {
+func (c LoginCommand) Execute(args *arguments.Login, view views.Login) int {
+	var diags tfdiags.Diagnostics
+
 	ctx := c.CommandContext()
 	ctx, span := tracing.Tracer().Start(ctx, "Login")
 	defer span.End()
-
-	common, rawArgs := arguments.ParseView(rawArgs)
-	c.View.Configure(common)
-	// Because the legacy UI was using println to show diagnostics and the new view is using, by default, print,
-	// in order to keep functional parity, we setup the view to add a new line after each diagnostic.
-	c.View.DiagsWithNewline()
-
-	// Parse and validate flags
-	args, closer, diags := arguments.ParseLogin(rawArgs)
-	defer closer()
-
-	// Instantiate the view, even if there are flag errors, so that we render
-	// diagnostics according to the desired view
-	view := views.NewLogin(args.ViewOptions, c.View)
-	if diags.HasErrors() {
-		view.Diagnostics(diags)
-		if args.ViewOptions.ViewType == arguments.ViewJSON {
-			return 1
-		}
-		return cli.RunResultHelp
-	}
-	c.Meta.stateArgs = *args.State
-
-	// FIXME: the -input flag value is needed to initialize the backend and the
-	// operation, but there is no clear path to pass this value down, so we
-	// continue to mutate the Meta object state for now.
-	c.Meta.input = args.ViewOptions.InputEnabled
 
 	if !c.input {
 		diags = diags.Append(tfdiags.Sourceless(
@@ -332,35 +323,6 @@ func (c *LoginCommand) logMOTDError(err error) {
 	log.Printf("[TRACE] login: An error occurred attempting to fetch a message of the day for cloud backend: %s", err)
 }
 
-// Help implements cli.Command.
-func (c *LoginCommand) Help() string {
-	defaultFile := c.credentialsFileForHelp()
-
-	helpText := fmt.Sprintf(`
-Usage: tofu [global options] login [hostname]
-
-  Retrieves an authentication token for the given hostname, if it supports
-  automatic login, and saves it in a credentials file in your home directory.
-
-  If not overridden by credentials helper settings in the CLI configuration,
-  the credentials will be written to the following local file:
-      %s
-`, defaultFile)
-	return strings.TrimSpace(helpText)
-}
-
-// Synopsis implements cli.Command.
-func (c *LoginCommand) Synopsis() string {
-	return "Obtain and save credentials for a remote host"
-}
-
-func (c *LoginCommand) defaultOutputFile() string {
-	if c.SystemCfg.CLIConfigDir == "" {
-		return "" // no default available
-	}
-	return filepath.Join(c.SystemCfg.CLIConfigDir, "credentials.tfrc.json")
-}
-
 func (c *LoginCommand) interactiveGetTokenByCode(ctx context.Context, hostname svchost.Hostname, credsCtx *loginCredentialsContext, clientConfig *disco.OAuthClient, view views.Login) (*oauth2.Token, tfdiags.Diagnostics) {
 	var diags tfdiags.Diagnostics
 	confirm, confirmDiags := c.interactiveContextConsent(ctx, hostname, disco.OAuthAuthzCodeGrant, credsCtx, view)
@@ -517,9 +479,9 @@ func (c *LoginCommand) interactiveGetTokenByCode(ctx context.Context, hostname s
 				"Current command was aborted by the calling code.",
 			),
 		)
-    if err := server.Shutdown(ctx); err != nil {
-		log.Printf("[WARN] login: callback server shutdown failed: %s", err)
-	}
+		if err := server.Shutdown(ctx); err != nil {
+			log.Printf("[WARN] login: callback server shutdown failed: %s", err)
+		}
 		wg.Wait()
 		close(codeCh)
 		return nil, diags
@@ -848,20 +810,6 @@ func (c *LoginCommand) proofKey() (key, challenge string, err error) {
 	challenge = base64.RawURLEncoding.EncodeToString(h.Sum(nil))
 
 	return key, challenge, nil
-}
-
-func (c *LoginCommand) credentialsFileForHelp() string {
-	defaultFile := c.defaultOutputFile()
-	if defaultFile == "" {
-		// Because this is just for the help message and it's very unlikely
-		// that a user wouldn't have a functioning home directory anyway,
-		// we'll just use a placeholder here. The real command has some
-		// more complex behavior for this case. This result is not correct
-		// on all platforms, but given how unlikely we are to hit this case
-		// that seems okay.
-		defaultFile = "~/.terraform/credentials.tfrc.json"
-	}
-	return defaultFile
 }
 
 type loginCredentialsContext struct {

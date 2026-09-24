@@ -40,7 +40,7 @@ import (
 )
 
 func TestContext2Plan_removedDuringRefresh(t *testing.T) {
-	SkipExperimental(t, ExperimentalFeatureUpgradeState, ExperimentalFeatureTaint)
+	SkipExperimental(t, ExperimentalFeatureTaint)
 
 	// This tests the situation where an object tracked in the previous run
 	// state has been deleted outside OpenTofu, which we should detect
@@ -341,8 +341,6 @@ resource "test_object" "a" {
 }
 
 func TestContext2Plan_dataReferencesResourceInModules(t *testing.T) {
-	SkipExperimental(t, ExperimentalBugDeclareProvider)
-
 	p := testProvider("test")
 	p.ReadDataSourceFn = func(req providers.ReadDataSourceRequest) (resp providers.ReadDataSourceResponse) {
 		cfg := req.Config.AsValueMap()
@@ -429,7 +427,7 @@ resource "test_resource" "b" {
 }
 
 func TestContext2Plan_resourceChecksInExpandedModule(t *testing.T) {
-	SkipExperimental(t, ExperimentalBugDeclareProvider, ExperimentalFeatureChecks)
+	SkipExperimental(t, ExperimentalFeatureChecks)
 
 	// When a resource is in a nested module we have two levels of expansion
 	// to do: first expand the module the resource is declared in, and then
@@ -1071,7 +1069,7 @@ resource "test_object" "a" {
 }
 
 func TestContext2Plan_destroyWithRefresh_skipImport(t *testing.T) {
-	SkipExperimental(t, ExperimentalFeatureImport, ExperimentalFeatureDestroy)
+	SkipExperimental(t, ExperimentalFeatureImport)
 
 	m := testModuleInline(t, map[string]string{
 		"main.tf": `
@@ -1804,9 +1802,10 @@ func TestContext2Plan_movedResourceToDifferentType(t *testing.T) {
 			}),
 			oldType: "provider_object",
 			newType: "provider_object",
+			newAddr: "provider_object.old",
 			config: map[string]string{
 				"main.tf": `
-					resource "provider_object" "new" {
+					resource "provider_object" "old" {
 					        count = 1
 						test_number = 1
 					}
@@ -2147,6 +2146,9 @@ OpenTofu has planned to destroy these objects. If OpenTofu's proposed changes ar
 		if got, want := instPlan.Action, plans.Delete; got != want {
 			t.Errorf("wrong planned action\ngot:  %s\nwant: %s", got, want)
 		}
+
+		// Note: by skipping here, we still check for the errors and failures above!
+		SkipExperimental(t, ExperimentalFeatureActionReason)
 		if got, want := instPlan.ActionReason, plans.ResourceInstanceDeleteBecauseWrongRepetition; got != want {
 			t.Errorf("wrong action reason\ngot:  %s\nwant: %s", got, want)
 		}
@@ -2274,7 +2276,8 @@ OpenTofu has planned to destroy these objects. If OpenTofu's proposed changes ar
 }
 
 func TestContext2Plan_movedResourceUntargeted(t *testing.T) {
-	SkipExperimental(t, ExperimentalFeatureMoved)
+	// I did not see the "excludes" flag in experimental features, but that's used here, too.
+	SkipExperimental(t, ExperimentalFeatureMoved, ExperimentalFeatureTarget)
 	addrA := mustResourceInstanceAddr("test_object.a")
 	addrB := mustResourceInstanceAddr("test_object.b")
 	m := testModuleInline(t, map[string]string{
@@ -2624,6 +2627,167 @@ The -target and -exclude options are not for routine use, and are provided only 
 	})
 }
 
+func TestContext2Plan_movedResourceErrors(t *testing.T) {
+	SkipExperimental(t, ExperimentalFeatureMoved)
+
+	type testChange struct {
+		addr        addrs.AbsResourceInstance
+		prevRunAddr addrs.AbsResourceInstance
+		action      plans.Action
+	}
+
+	type test struct {
+		configFolder string
+		state        *states.State
+		planChanges  []testChange
+		wantDiag     map[string][]string
+	}
+
+	// state building functions
+	makeState := func(s *states.SyncState, addr string) {
+		s.SetResourceInstanceCurrent(mustResourceInstanceAddr(addr), &states.ResourceInstanceObjectSrc{
+			AttrsJSON: []byte(`{}`),
+			Status:    states.ObjectReady,
+		}, mustProviderConfig(`provider["registry.opentofu.org/hashicorp/test"]`), addrs.NoKey)
+	}
+
+	tests := map[string]test{
+		"ambiguous move from two addresses": {
+			configFolder: "move-ambig-from",
+			state: states.BuildState(func(s *states.SyncState) {
+				makeState(s, "test_object.a")
+				makeState(s, "test_object.b")
+			}),
+			wantDiag: map[string][]string{
+				"Ambiguous move statements": {
+					"test_object.a moved to test_object.c, but this statement instead declares that test_object.b moved there.",
+					"test_object.b moved to test_object.c, but this statement instead declares that test_object.a moved there.",
+				},
+			},
+		},
+		"ambiguous move to two addresses": {
+			configFolder: "move-ambig-to",
+			state: states.BuildState(func(s *states.SyncState) {
+				makeState(s, "test_object.a")
+			}),
+			wantDiag: map[string][]string{
+				"Ambiguous move statements": {
+					"test_object.a moved to test_object.b, but this statement instead declares that it moved to test_object.c.",
+					"test_object.a moved to test_object.c, but this statement instead declares that it moved to test_object.b.",
+				},
+			},
+		},
+		"redundant move statements": {
+			configFolder: "move-double",
+			state: states.BuildState(func(s *states.SyncState) {
+				makeState(s, "test_object.a")
+			}),
+			planChanges: []testChange{
+				{
+					addr:        mustResourceInstanceAddr("test_object.b"),
+					prevRunAddr: mustResourceInstanceAddr("test_object.a"),
+					action:      plans.NoOp,
+				},
+			},
+		},
+		"cycle in several move statements": {
+			configFolder: "move-cycle",
+			state:        states.NewState(),
+			wantDiag: map[string][]string{
+				"Cyclic dependency in move statements": {"The following chained move statements form a cycle, and so there is no final location"},
+			},
+		},
+		"self-cycle in a move statements": {
+			configFolder: "move-self-cycle",
+			state: states.BuildState(func(s *states.SyncState) {
+				makeState(s, "test_object.a")
+			}),
+			wantDiag: map[string][]string{
+				"Redundant move statement": {""},
+			},
+		},
+		"move blocked by already-present state": {
+			configFolder: "move-blocked",
+			state: states.BuildState(func(s *states.SyncState) {
+				makeState(s, "test_object.a")
+				makeState(s, "test_object.b")
+			}),
+			wantDiag: map[string][]string{
+				"Unresolved resource instance address changes": {"OpenTofu has planned to destroy these objects."},
+			},
+		},
+		"object to move still in configuration": {
+			configFolder: "move-exist-obj",
+			state: states.BuildState(func(s *states.SyncState) {
+				makeState(s, "test_object.a")
+			}),
+			wantDiag: map[string][]string{
+				"Moved object still exists": {"This statement declares a move from test_object.a, but that resource is still declared"},
+			},
+		},
+	}
+	for testName, tc := range tests {
+		t.Run(testName, func(t *testing.T) {
+			m := testModule(t, tc.configFolder)
+			state := tc.state
+
+			p := simpleMockProvider()
+			ctx := testContext2(t, &ContextOpts{
+				Plugins: plugins.NewLibrary(map[addrs.Provider]providers.Factory{
+					addrs.NewDefaultProvider("test"): testProviderFuncFixed(p),
+				}, nil),
+			})
+			plan, diags := ctx.Plan(context.Background(), m, state, DefaultPlanOpts)
+			if diags != nil {
+				if len(tc.wantDiag) == 0 {
+					t.Fatalf("unexpected errors: %v", diags.Err())
+				}
+				// check for expected errs
+				for _, diag := range diags {
+					wantedDetailSubstrs, ok := tc.wantDiag[diag.Description().Summary]
+					if !ok {
+						t.Errorf("diagnostic with summary \"%s\" occurred, but did not expect this one", diag.Description().Summary)
+						continue
+					}
+					found := false
+					for _, possibleSubstr := range wantedDetailSubstrs {
+						if strings.Contains(diag.Description().Detail, possibleSubstr) {
+							found = true
+							break
+						}
+					}
+					if !found {
+						t.Errorf("expected diagnostic to contain substring: \"%s\"\nActual diagnostic:\n%s", wantedDetailSubstrs, diag.Description().Detail)
+					}
+				}
+				return
+			} else {
+				if plan == nil || plan.Changes == nil {
+					t.Fatal("nil plan with nil diags, this should never happen!")
+				}
+				if len(tc.wantDiag) != 0 && !diags.HasErrors() {
+					t.Fatalf("expected errors, but got none")
+				}
+				// plan.Changes is non-nil, check the plan looks right.
+				for _, planChange := range tc.planChanges {
+					change := plan.Changes.ResourceInstance(planChange.addr)
+					if change == nil {
+						t.Errorf("tried to find address %s in plan changes, but did not find it", planChange.addr)
+						continue
+					}
+					if change.Action != planChange.action {
+						t.Errorf("expected action %s, got %s", planChange.action, change.Action)
+					}
+					if !change.PrevRunAddr.Equal(planChange.prevRunAddr) {
+						t.Errorf("expected move from %s, got %s", planChange.prevRunAddr, change.PrevRunAddr)
+					}
+				}
+
+			}
+		})
+	}
+}
+
 func TestContext2Plan_untargetedResourceSchemaChange(t *testing.T) {
 	SkipExperimental(t, ExperimentalFeatureTarget)
 
@@ -2756,7 +2920,7 @@ resource "test_object" "b" {
 }
 
 func TestContext2Plan_movedResourceRefreshOnly(t *testing.T) {
-	SkipExperimental(t, ExperimentalFeatureMoved)
+	SkipExperimental(t, ExperimentalFeatureMoved, ExperimentalFeatureRefreshOnly)
 	addrA := mustResourceInstanceAddr("test_object.a")
 	addrB := mustResourceInstanceAddr("test_object.b")
 	m := testModuleInline(t, map[string]string{
@@ -3390,8 +3554,6 @@ data "test_data_source" "foo" {
 }
 
 func TestContext2Plan_forceReplace(t *testing.T) {
-	SkipExperimental(t, ExperimentalFeatureForceReplace)
-
 	addrA := mustResourceInstanceAddr("test_object.a")
 	addrB := mustResourceInstanceAddr("test_object.b")
 	m := testModuleInline(t, map[string]string{
@@ -3446,13 +3608,6 @@ func TestContext2Plan_forceReplace(t *testing.T) {
 	})
 	t.Run(addrB.String(), func(t *testing.T) {
 		instPlan := plan.Changes.ResourceInstance(addrB)
-		if experimentalRuntimeEnabled() {
-			if instPlan != nil {
-				t.Fatalf("expected no plan for %s at all", addrB)
-			}
-			// New engine does not generate NoOps
-			return
-		}
 		if instPlan == nil {
 			t.Fatalf("no plan for %s at all", addrB)
 		}
@@ -3467,8 +3622,6 @@ func TestContext2Plan_forceReplace(t *testing.T) {
 }
 
 func TestContext2Plan_forceReplaceIncompleteAddr(t *testing.T) {
-	SkipExperimental(t, ExperimentalFeatureForceReplace)
-
 	addr0 := mustResourceInstanceAddr("test_object.a[0]")
 	addr1 := mustResourceInstanceAddr("test_object.a[1]")
 	addrBare := mustResourceInstanceAddr("test_object.a")
@@ -3517,13 +3670,6 @@ func TestContext2Plan_forceReplaceIncompleteAddr(t *testing.T) {
 
 	t.Run(addr0.String(), func(t *testing.T) {
 		instPlan := plan.Changes.ResourceInstance(addr0)
-		if experimentalRuntimeEnabled() {
-			if instPlan != nil {
-				t.Fatalf("expected no plan for %s at all", addr0)
-			}
-			// New engine does not generate NoOps
-			return
-		}
 
 		if instPlan == nil {
 			t.Fatalf("no plan for %s at all", addr0)
@@ -3538,13 +3684,6 @@ func TestContext2Plan_forceReplaceIncompleteAddr(t *testing.T) {
 	})
 	t.Run(addr1.String(), func(t *testing.T) {
 		instPlan := plan.Changes.ResourceInstance(addr1)
-		if experimentalRuntimeEnabled() {
-			if instPlan != nil {
-				t.Fatalf("expected no plan for %s at all", addr1)
-			}
-			// New engine does not generate NoOps
-			return
-		}
 		if instPlan == nil {
 			t.Fatalf("no plan for %s at all", addr1)
 		}
@@ -3563,7 +3702,6 @@ func TestContext2Plan_forceReplaceIncompleteAddr(t *testing.T) {
 // I've added all the required test cases that are needed to verify the fix for the issue.
 // This will cover the scope of issue #4368
 func TestContext2Plan_forceReplaceIncompleteAddr_multipleResources(t *testing.T) {
-	SkipExperimental(t, ExperimentalFeatureForceReplace)
 	rootAddr0 := mustResourceInstanceAddr("test_object.foo[0]")
 	rootAddr1 := mustResourceInstanceAddr("test_object.foo[1]")
 	childAddr0 := mustResourceInstanceAddr("module.child.test_object.foo[0]")
@@ -3637,8 +3775,6 @@ func TestContext2Plan_forceReplaceIncompleteAddr_multipleResources(t *testing.T)
 // Verify that adding a module instance does force existing module data sources
 // to be deferred
 func TestContext2Plan_noChangeDataSourceAddingModuleInstance(t *testing.T) {
-	SkipExperimental(t, ExperimentalBugDeclareProvider)
-
 	m := testModuleInline(t, map[string]string{
 		"main.tf": `
 locals {
@@ -3749,7 +3885,7 @@ output "output" {
 }
 
 func TestContext2Plan_moduleImplicitMove(t *testing.T) {
-	SkipExperimental(t, ExperimentalBugDeclareProvider, ExperimentalFeatureMoved)
+	SkipExperimental(t, ExperimentalFeatureMoved)
 
 	// Modules are being moved implicitly to use the `enabled` field when nothing
 	// is declared on the block. Alternatively, they are implicitly being moved from
@@ -3760,6 +3896,7 @@ func TestContext2Plan_moduleImplicitMove(t *testing.T) {
 		prevAddr     addrs.AbsResourceInstance
 		config       *configs.Config
 		prevState    *states.State
+		skipFlags    []ExperimentalFlag
 	}{
 		"from count-module single-resource to enabled-module single-resource": {
 			config: testModuleInline(t, map[string]string{
@@ -3960,6 +4097,7 @@ func TestContext2Plan_moduleImplicitMove(t *testing.T) {
 					Status:    states.ObjectReady,
 				}, mustProviderConfig(`provider["registry.opentofu.org/hashicorp/test"]`), addrs.NoKey)
 			}),
+			skipFlags: []ExperimentalFlag{ExperimentalFeatureModuleEnabled},
 		},
 	}
 
@@ -3972,6 +4110,7 @@ func TestContext2Plan_moduleImplicitMove(t *testing.T) {
 
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
+			SkipExperimental(t, test.skipFlags...)
 			plan, diags := ctx.Plan(context.Background(), test.config, test.prevState, DefaultPlanOpts)
 			if diags.HasErrors() {
 				t.Fatalf("unexpected errors\n%s", diags.Err().Error())
@@ -4694,7 +4833,7 @@ output "a" {
 }
 
 func TestContext2Plan_preconditionErrors(t *testing.T) {
-	SkipExperimental(t, ExperimentalChangeDiagWording, ExperimentalBugVariableInput)
+	SkipExperimental(t, ExperimentalChangeDiagWording)
 
 	testCases := []struct {
 		condition   string
@@ -4851,8 +4990,6 @@ output "a" {
 }
 
 func TestContext2Plan_triggeredBy(t *testing.T) {
-	SkipExperimental(t, ExperimentalFeatureReplaceTB)
-
 	type TestConfiguration struct {
 		Description         string
 		inlineConfiguration map[string]string
@@ -5168,8 +5305,6 @@ resource "test_object" "b" {
 // plan a destroy with no state where configuration could fail to evaluate
 // expansion indexes.
 func TestContext2Plan_emptyDestroy(t *testing.T) {
-	SkipExperimental(t, ExperimentalBugDeclareProvider)
-
 	m := testModuleInline(t, map[string]string{
 		"main.tf": `
 locals {
@@ -5278,7 +5413,6 @@ resource "test_object" "b" {
 		}, nil),
 	})
 
-	SkipExperimental(t, ExperimentalBugMissingProvider)
 	_, diags := ctx.Plan(context.Background(), m, state, &PlanOpts{
 		Mode: plans.NormalMode,
 	})
@@ -5472,7 +5606,6 @@ output "out" {
 }
 
 func TestContext2Plan_destroyPartialStateLocalRef(t *testing.T) {
-	SkipExperimental(t, ExperimentalBugDeclareProvider)
 	m := testModuleInline(t, map[string]string{
 		"main.tf": `
 module "already_destroyed" {
@@ -8309,12 +8442,7 @@ import {
 }
 
 func TestContext2Plan_providerForEachWithOrphanResourceInstanceNotUsingForEach(t *testing.T) {
-	// This currently fails in the new runtime because it doesn't have the
-	// special check for the situation where prior state has a resource instance
-	// belonging to a provider instance that isn't in the latest configuration.
-	// It just treats it as a general provider initialization failure:
-	//    Cannot plan test_thing.a["orphaned"] because its associated provider instance provider["terraform.io/builtin/test"].multi cannot initialize.
-	SkipExperimental(t, ExperimentalBugMissingProvider, ExperimentalChangeDiagWording)
+	SkipExperimental(t, ExperimentalChangeDiagWording)
 
 	// This test is to cover the bug reported in this issue:
 	//    https://github.com/opentofu/opentofu/issues/2334
@@ -8455,7 +8583,7 @@ locals {
 }
 
 func TestContext2Plan_removedResourceBasic(t *testing.T) {
-	SkipExperimental(t, ExperimentalBugDeclareProvider, ExperimentalFeatureRemoved)
+	SkipExperimental(t, ExperimentalFeatureRemoved)
 
 	desposedKey := states.DeposedKey("deposed")
 	addr := mustResourceInstanceAddr("test_object.a")
@@ -8538,7 +8666,7 @@ func TestContext2Plan_removedResourceBasic(t *testing.T) {
 }
 
 func TestContext2Plan_removedModuleBasic(t *testing.T) {
-	SkipExperimental(t, ExperimentalBugDeclareProvider, ExperimentalFeatureRemoved)
+	SkipExperimental(t, ExperimentalFeatureRemoved)
 
 	desposedKey := states.DeposedKey("deposed")
 	addr := mustResourceInstanceAddr("module.mod.test_object.a")
@@ -8621,7 +8749,7 @@ func TestContext2Plan_removedModuleBasic(t *testing.T) {
 }
 
 func TestContext2Plan_removedModuleForgetsAllInstances(t *testing.T) {
-	SkipExperimental(t, ExperimentalBugDeclareProvider, ExperimentalFeatureRemoved)
+	SkipExperimental(t, ExperimentalFeatureRemoved)
 
 	addrFirst := mustResourceInstanceAddr("module.mod[0].test_object.a")
 	addrSecond := mustResourceInstanceAddr("module.mod[1].test_object.a")
@@ -8689,7 +8817,7 @@ func TestContext2Plan_removedModuleForgetsAllInstances(t *testing.T) {
 }
 
 func TestContext2Plan_removedResourceForgetsAllInstances(t *testing.T) {
-	SkipExperimental(t, ExperimentalBugDeclareProvider, ExperimentalFeatureRemoved)
+	SkipExperimental(t, ExperimentalFeatureRemoved)
 
 	addrFirst := mustResourceInstanceAddr("test_object.a[0]")
 	addrSecond := mustResourceInstanceAddr("test_object.a[1]")
@@ -8757,7 +8885,7 @@ func TestContext2Plan_removedResourceForgetsAllInstances(t *testing.T) {
 }
 
 func TestContext2Plan_removedResourceInChildModuleFromParentModule(t *testing.T) {
-	SkipExperimental(t, ExperimentalBugDeclareProvider, ExperimentalFeatureRemoved)
+	SkipExperimental(t, ExperimentalFeatureRemoved)
 
 	addr := mustResourceInstanceAddr("module.mod.test_object.a")
 	m := testModuleInline(t, map[string]string{
@@ -8821,7 +8949,7 @@ func TestContext2Plan_removedResourceInChildModuleFromParentModule(t *testing.T)
 }
 
 func TestContext2Plan_removedResourceInChildModuleFromChildModule(t *testing.T) {
-	SkipExperimental(t, ExperimentalBugDeclareProvider, ExperimentalFeatureRemoved)
+	SkipExperimental(t, ExperimentalFeatureRemoved)
 
 	addr := mustResourceInstanceAddr("module.mod.test_object.a")
 	m := testModuleInline(t, map[string]string{
@@ -8885,7 +9013,7 @@ func TestContext2Plan_removedResourceInChildModuleFromChildModule(t *testing.T) 
 }
 
 func TestContext2Plan_removedResourceInGrandchildModuleFromRootModule(t *testing.T) {
-	SkipExperimental(t, ExperimentalBugDeclareProvider, ExperimentalFeatureRemoved)
+	SkipExperimental(t, ExperimentalFeatureRemoved)
 
 	addr := mustResourceInstanceAddr("module.child.module.grandchild.test_object.a")
 	m := testModuleInline(t, map[string]string{
@@ -8950,7 +9078,7 @@ func TestContext2Plan_removedResourceInGrandchildModuleFromRootModule(t *testing
 }
 
 func TestContext2Plan_removedChildModuleForgetsResourceInGrandchildModule(t *testing.T) {
-	SkipExperimental(t, ExperimentalBugDeclareProvider, ExperimentalFeatureRemoved)
+	SkipExperimental(t, ExperimentalFeatureRemoved)
 
 	addr := mustResourceInstanceAddr("module.child.module.grandchild.test_object.a")
 	m := testModuleInline(t, map[string]string{
@@ -9628,8 +9756,6 @@ func featuresBlockTestSchema() *configschema.Block {
 // use a shared submodule containing a check block with a nested data source,
 // this should not cause a dependency cycle.
 func TestContext2Plan_moduleDependsOnWithCheck(t *testing.T) {
-	SkipExperimental(t, ExperimentalFeatureDependsOn, ExperimentalBugDeclareProvider)
-
 	m := testModule(t, "plan-module-depends-on-check")
 
 	p := &MockProvider{

@@ -14,7 +14,6 @@ import (
 	"path"
 	"slices"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/opentofu/opentofu/internal/lang"
@@ -41,108 +40,33 @@ const (
 	MainStateIdentifier = ""
 )
 
+func TestCommander() Command {
+	cmd := Command{
+		Name:  "test",
+		Short: "Execute integration tests for OpenTofu modules",
+		Long: `Executes automated integration tests against the current OpenTofu configuration.
+
+OpenTofu will search for .tftest.hcl files within the current configuration and testing directories. OpenTofu will then execute the testing run blocks 
+within any testing files in order, and verify conditional checks and assertions against the created infrastructure. 
+
+This command creates real infrastructure and will attempt to clean up the testing infrastructure on completion. Monitor the output carefully to ensure this cleanup process is successful.`,
+	}
+
+	args := arguments.BindTest(&cmd.CommandLine)
+	cmd.Run = func(meta Meta) int {
+		return TestCommand{meta}.Execute(args, views.NewTest(args.View, meta.View))
+	}
+
+	return cmd
+}
+
 type TestCommand struct {
 	Meta
 }
 
-func (c *TestCommand) Help() string {
-	helpText := `
-Usage: tofu [global options] test [options]
-
-  Executes automated integration tests against the current OpenTofu 
-  configuration.
-
-  OpenTofu will search for .tftest.hcl files within the current configuration 
-  and testing directories. OpenTofu will then execute the testing run blocks 
-  within any testing files in order, and verify conditional checks and 
-  assertions against the created infrastructure. 
-
-  This command creates real infrastructure and will attempt to clean up the
-  testing infrastructure on completion. Monitor the output carefully to ensure
-  this cleanup process is successful.
-
-Options:
-
-  -compact-warnings     If OpenTofu produces any warnings that are not
-                        accompanied by errors, show them in a more compact
-                        form that includes only the summary messages.
-
-  -consolidate-warnings If OpenTofu produces any warnings, no consolidation
-                        will be performed. All locations, for all warnings
-                        will be listed. Enabled by default.
-
-  -consolidate-errors   If OpenTofu produces any errors, no consolidation
-                        will be performed. All locations, for all errors
-                        will be listed. Disabled by default
-
-  -filter=testfile      If specified, OpenTofu will only execute the test files
-                        specified by this flag. You can use this option multiple
-                        times to execute more than one test file. The path should
-                        be relative to the current working directory, even if
-                        -test-directory is set.
-
-  -json                 If specified, machine readable output will be printed in
-                        JSON format
-
-  -json-into=out.json   Produce the same output as -json, but sent directly
-                        to the given file. This allows automation to preserve
-                        the original human-readable output streams, while
-                        capturing more detailed logs for machine analysis.
-
-  -no-color             If specified, output won't contain any color.
-
-  -test-directory=path  Set the OpenTofu test directory, defaults to "tests". When set, the
-                        test command will search for test files in the current directory and
-                        in the one specified by the flag.
-
-  -var 'foo=bar'        Set a value for one of the input variables in the root
-                        module of the configuration. Use this option more than
-                        once to set more than one variable.
-
-  -var-file=filename    Load variable values from the given file, in addition
-                        to the default files terraform.tfvars and *.auto.tfvars.
-                        Use this option more than once to include more than one
-                        variables file.
-
-  -verbose              Print the plan or state for each test run block as it
-                        executes.
-
-  -var 'foo=bar'        Set a value for one of the input variables in the root
-                        module of the configuration. Use this option more than
-                        once to set more than one variable.
-
-  -var-file=filename    Load variable values from the given file, in addition
-                        to the default files terraform.tfvars and *.auto.tfvars.
-                        Use this option more than once to include more than one
-                        variables file.
-`
-	return strings.TrimSpace(helpText)
-}
-
-func (c *TestCommand) Synopsis() string {
-	return "Execute integration tests for OpenTofu modules"
-}
-
-func (c *TestCommand) Run(rawArgs []string) int {
+func (c TestCommand) Execute(args *arguments.Test, view views.Test) int {
 	var diags tfdiags.Diagnostics
 	ctx := c.CommandContext()
-
-	common, rawArgs := arguments.ParseView(rawArgs)
-	c.View.Configure(common)
-
-	args, closer, diags := arguments.ParseTest(rawArgs)
-	defer closer()
-	if diags.HasErrors() {
-		c.View.Diagnostics(diags)
-		c.View.HelpPrompt("test")
-		return 1
-	}
-
-	view := views.NewTest(args.ViewOptions, c.View)
-
-	// Users can also specify variables via the command line, so we'll parse
-	// all that here.
-	c.variableArgs = args.Vars.All()
 
 	variables, variableDiags := c.collectVariableValuesWithTests(args.TestDirectory)
 	diags = diags.Append(variableDiags)
@@ -270,7 +194,7 @@ func (c *TestCommand) Run(rawArgs []string) int {
 	cancelCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 
 	runner := &TestSuiteRunner{
-		command: c,
+		command: &c,
 
 		Suite:  &suite,
 		Config: config,

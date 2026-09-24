@@ -7,9 +7,7 @@ package command
 
 import (
 	"fmt"
-	"strings"
 
-	"github.com/mitchellh/cli"
 	"github.com/opentofu/opentofu/internal/command/arguments"
 	"github.com/opentofu/opentofu/internal/command/views"
 	"github.com/posener/complete"
@@ -17,35 +15,32 @@ import (
 	"github.com/opentofu/opentofu/internal/tfdiags"
 )
 
+func WorkspaceListCommander(legacyName bool) Command {
+	cmd := Command{
+		Name:  "list",
+		Short: "List Workspaces",
+		Long:  `List OpenTofu workspaces.`,
+
+		DiagsWithNewline: true,
+	}
+
+	args := arguments.BindWorkspaceList(&cmd.CommandLine)
+	cmd.Run = func(meta Meta) int {
+		return WorkspaceListCommand{meta, legacyName}.Execute(args, views.NewWorkspace(args.View, meta.View))
+	}
+
+	return cmd
+}
+
 type WorkspaceListCommand struct {
 	Meta
 	LegacyName bool
 }
 
-func (c *WorkspaceListCommand) Run(rawArgs []string) int {
+func (c WorkspaceListCommand) Execute(args *arguments.WorkspaceList, view views.Workspace) int {
+	var diags tfdiags.Diagnostics
+
 	ctx := c.CommandContext()
-
-	common, rawArgs := arguments.ParseView(rawArgs)
-	c.View.Configure(common)
-	// Because the legacy UI was using println to show diagnostics and the new view is using, by default, print,
-	// in order to keep functional parity, we setup the view to add a new line after each diagnostic.
-	c.View.DiagsWithNewline()
-
-	// Parse and validate flags
-	args, closer, diags := arguments.ParseWorkspaceList(rawArgs)
-	defer closer()
-
-	// Instantiate the view, even if there are flag errors, so that we render
-	// diagnostics according to the desired view
-	view := views.NewWorkspace(args.ViewOptions, c.View)
-	if diags.HasErrors() {
-		view.Diagnostics(diags)
-		if args.ViewOptions.ViewType == arguments.ViewJSON {
-			return 1
-		}
-		return cli.RunResultHelp
-	}
-	c.Meta.variableArgs = args.Vars.All()
 
 	view.WarnWhenUsedAsEnvCmd(c.LegacyName)
 
@@ -105,35 +100,4 @@ func (c *WorkspaceListCommand) AutocompleteArgs() complete.Predictor {
 
 func (c *WorkspaceListCommand) AutocompleteFlags() complete.Flags {
 	return nil
-}
-
-func (c *WorkspaceListCommand) Help() string {
-	helpText := `
-Usage: tofu [global options] workspace list [options]
-
-  List OpenTofu workspaces.
-
-Options:
-
-  -var 'foo=bar'       Set a value for one of the input variables in the root
-                       module of the configuration. Use this option more than
-                       once to set more than one variable.
-
-  -var-file=filename   Load variable values from the given file, in addition
-                       to the default files terraform.tfvars and *.auto.tfvars.
-                       Use this option more than once to include more than one
-                       variables file.
-    
-  -json                The output of the command is printed in json format.
-
-  -json-into=out.json  Produce the same output as -json, but sent directly
-                       to the given file. This allows automation to preserve
-                       the original human-readable output streams, while
-                       capturing more detailed logs for machine analysis.
-`
-	return strings.TrimSpace(helpText)
-}
-
-func (c *WorkspaceListCommand) Synopsis() string {
-	return "List Workspaces"
 }

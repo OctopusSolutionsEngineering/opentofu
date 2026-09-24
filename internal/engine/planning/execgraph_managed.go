@@ -15,6 +15,7 @@ import (
 	"github.com/opentofu/opentofu/internal/engine/internal/execgraph"
 	"github.com/opentofu/opentofu/internal/lang/eval"
 	"github.com/opentofu/opentofu/internal/plans"
+	"github.com/opentofu/opentofu/internal/resources"
 	"github.com/opentofu/opentofu/internal/states"
 )
 
@@ -30,7 +31,7 @@ import (
 // subgraphs.
 func (b *execGraphBuilder) ManagedResourceInstanceSubgraph(
 	plannedChange *plans.ResourceInstanceChange,
-	effectiveReplaceOrder resourceInstanceReplaceOrder,
+	effectiveReplaceOrder resources.ReplaceOrder,
 ) resourceInstanceObjectSubgraph {
 	// Before we go any further we'll just make sure what we've been given
 	// is sensible, so that the remaining code can assume the following
@@ -55,7 +56,7 @@ func (b *execGraphBuilder) ManagedResourceInstanceSubgraph(
 	if changeAction.IsReplace() {
 		// The effective replace order finalizes which of the two replace
 		// actions we will actually use.
-		changeAction = effectiveReplaceOrder.ChangeAction()
+		changeAction = replaceOrderPlanAction(effectiveReplaceOrder)
 	}
 
 	// The shape of execution subgraph we generate here varies depending on
@@ -72,10 +73,7 @@ func (b *execGraphBuilder) ManagedResourceInstanceSubgraph(
 	case plans.CreateThenDelete:
 		return b.managedResourceInstanceSubgraphCreateThenDelete(plannedChange)
 	case plans.NoOp:
-		// TODO: We need to handle this because it can occur if the
-		// configuration hasn't changed but the object will move to a new
-		// resource instance address during the apply phase.
-		panic("plans.NoOp execution graph not yet implemented")
+		return b.managedResourceInstanceSubgraphNoOp(plannedChange)
 	default:
 		// We should not get here: the cases above should cover every action
 		// that [planGlue.planDesiredManagedResourceInstance] can possibly
@@ -287,6 +285,18 @@ func (b *execGraphBuilder) managedResourceInstanceSubgraphCreateThenDelete(
 		deletionRef:   deletionRef,
 		addDesiredDep: addCreateDep,
 		addOrphanDep:  addDeleteDep,
+	}
+}
+
+func (b *execGraphBuilder) managedResourceInstanceSubgraphNoOp(
+	plannedChange *plans.ResourceInstanceChange,
+) resourceInstanceObjectSubgraph {
+	_, addCreateDep := b.lower.MutableWaiter()
+
+	_, _, priorStateRef, _ := b.managedResourceInstanceChangeInputs(plannedChange)
+	return resourceInstanceObjectSubgraph{
+		valueRef:      priorStateRef,
+		addDesiredDep: addCreateDep,
 	}
 }
 

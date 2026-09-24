@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/opentofu/opentofu/internal/configs/symlib"
 
 	"github.com/hashicorp/hcl/v2"
 )
@@ -79,7 +80,13 @@ func TestParserLoadConfigFileFailure(t *testing.T) {
 				name: string(src),
 			})
 
-			_, diags := parser.LoadConfigFile(name)
+			file, diags := parser.LoadConfigFile(name)
+			// TODO many of these errors are now deferred until module loading
+			// This is a structural issue which existed before static evaluation, but has been made worse by it
+			// See https://github.com/opentofu/opentofu/issues/1467 for more details
+			for _, vc := range file.Variables {
+				diags = diags.Extend(vc.finalize(symlib.EmptyTable))
+			}
 			if !diags.HasErrors() {
 				t.Errorf("LoadConfigFile succeeded; want errors")
 			}
@@ -185,7 +192,14 @@ func TestParserLoadConfigFileFailureMessages(t *testing.T) {
 				test.Filename: string(src),
 			})
 
-			_, diags := parser.LoadConfigFile(test.Filename)
+			file, diags := parser.LoadConfigFile(test.Filename)
+			// TODO many of these errors are now deferred until module loading
+			// This is a structural issue which existed before static evaluation, but has been made worse by it
+			// See https://github.com/opentofu/opentofu/issues/1467 for more details
+			for _, vc := range file.Variables {
+				diags = diags.Extend(vc.finalize(symlib.EmptyTable))
+			}
+
 			if len(diags) != 1 {
 				t.Errorf("Wrong number of diagnostics %d; want 1", len(diags))
 				for _, diag := range diags {
@@ -248,12 +262,19 @@ func TestParserLoadConfigFileWarning(t *testing.T) {
 				name: string(src),
 			})
 
-			_, diags := parser.LoadConfigFile(name)
+			file, diags := parser.LoadConfigFile(name)
 			if diags.HasErrors() {
 				t.Errorf("unexpected error diagnostics")
 				for _, diag := range diags {
 					t.Logf("- %s", diag)
 				}
+			}
+
+			// TODO many of these errors are now deferred until module loading
+			// This is a structural issue which existed before static evaluation, but has been made worse by it
+			// See https://github.com/opentofu/opentofu/issues/1467 for more details
+			for _, vc := range file.Variables {
+				diags = diags.Extend(vc.finalize(symlib.EmptyTable))
 			}
 
 			gotWarnings := make(map[int]string)
@@ -317,7 +338,10 @@ func TestParserLoadConfigFileError(t *testing.T) {
 			// TODO many of these errors are now deferred until module loading
 			// This is a structural issue which existed before static evaluation, but has been made worse by it
 			// See https://github.com/opentofu/opentofu/issues/1467 for more details
-			eval := NewStaticEvaluator(nil, RootModuleCallForTesting())
+			for _, vc := range file.Variables {
+				diags = diags.Extend(vc.finalize(symlib.EmptyTable))
+			}
+			eval := NewStaticEvaluator(nil, nil, RootModuleCallForTesting())
 			for _, mc := range file.ModuleCalls {
 				mDiags := mc.decodeStaticFields(t.Context(), eval)
 				diags = append(diags, mDiags...)
@@ -333,6 +357,32 @@ func TestParserLoadConfigFileError(t *testing.T) {
 
 			if diff := cmp.Diff(wantErrors, gotErrors); diff != "" {
 				t.Errorf("wrong errors\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestMockFileExt is a test thet verifies whether the function mockFileExi
+// returns the correct declared extension for the mock file
+func TestMockFileExt(t *testing.T) {
+	tests := map[string]struct {
+		name    string
+		wantExt string
+		wantOk  bool
+	}{
+		"tofumock":     {name: "aws.tofumock.hcl", wantExt: tofuTestMockExt, wantOk: true},
+		"tfmock":       {name: "aws.tfmock.hcl", wantExt: tfTestMockExt, wantOk: true},
+		"unrelated_tf": {name: "main.tf", wantExt: "", wantOk: false},
+		"readme":       {name: "README.md", wantExt: "", wantOk: false},
+		"test_file":    {name: "random.tftest.hcl", wantExt: "", wantOk: false},
+		"no_extension": {name: "config", wantExt: "", wantOk: false},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			gotExt, gotOk := mockFileExt(tc.name)
+			if gotExt != tc.wantExt || gotOk != tc.wantOk {
+				t.Fatalf("mockFileExt(%q) = (%q, %v), want (%q, %v)", tc.name, gotExt, gotOk, tc.wantExt, tc.wantOk)
 			}
 		})
 	}

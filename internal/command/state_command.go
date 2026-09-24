@@ -7,9 +7,32 @@ package command
 
 import (
 	"strings"
-
-	"github.com/mitchellh/cli"
 )
+
+func StateCommander() Command {
+	cmd := Command{
+		Name:  "state",
+		Short: "Advanced state management",
+		Long: `This command has subcommands for advanced state management.
+
+These subcommands can be used to slice and dice the OpenTofu state.
+This is sometimes necessary in advanced cases. For your safety, all state management commands that modify the state create a timestamped backup of the state prior to making modifications.
+
+The structure and output of the commands is specifically tailored to work well with the common Unix utilities such as grep, awk, etc. We recommend using those tools to perform more advanced state tasks.`,
+
+		Commands: []Command{
+			StateListCommander(),
+			StateMvCommander(),
+			StatePullCommander(),
+			StatePushCommander(),
+			StateReplaceProviderCommander(),
+			StateRmCommander(),
+			StateShowCommander(),
+		},
+	}
+
+	return cmd
+}
 
 // StateCommand is a Command implementation that just shows help for
 // the subcommands nested below it.
@@ -18,7 +41,7 @@ type StateCommand struct {
 }
 
 func (c *StateCommand) Run(_ []string) int {
-	return cli.RunResultHelp
+	return RunResultHelp
 }
 
 func (c *StateCommand) Help() string {

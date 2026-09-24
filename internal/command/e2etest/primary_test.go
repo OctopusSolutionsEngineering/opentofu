@@ -51,8 +51,8 @@ func TestPrimarySeparatePlan(t *testing.T) {
 
 	// Make sure we actually downloaded the plugins, rather than picking up
 	// copies that might be already installed globally on the system.
-	if !strings.Contains(stdout, "Installing hashicorp/template v") {
-		t.Errorf("template provider download message is missing from init output:\n%s", stdout)
+	if !strings.Contains(stdout, "Installing hashicorp/cloudinit v") {
+		t.Errorf("cloudinit provider download message is missing from init output:\n%s", stdout)
 		t.Logf("(this can happen if you have a copy of the plugin in one of the global plugin search dirs)")
 	}
 	if !strings.Contains(stdout, "Installing hashicorp/null v") {
@@ -124,7 +124,7 @@ func TestPrimarySeparatePlan(t *testing.T) {
 	sort.Strings(gotResources)
 
 	wantResources := []string{
-		"data.template_file.test",
+		"data.cloudinit_config.test",
 		"null_resource.test",
 	}
 
@@ -683,6 +683,183 @@ func TestEphemeralRepetitionData(t *testing.T) {
 
 }
 
+func TestCoreLintingRules(t *testing.T) {
+	t.Parallel()
+
+	tf := e2e.NewBinary(t, tofuBin, "testdata/linting")
+	buildSimpleProvider(t, "6", tf.WorkDir(), "simple")
+	exec := func(
+		t *testing.T,
+		chdir string,
+		lint []string,
+		expectedPlanOutput []outputCheck, // used also for the validate command to ensure that the expectations are similar between these 2 phases. Plan is meant to produce the same output as validate
+		expectedApplyOutput []outputCheck, // used also for the refresh command to ensure that the expectations are similar between these 2 phases. Refresh is executed after the changes are applied, so we expect to have the same warnings during refresh as we had during apply
+		expectedDestroyOutput []outputCheck,
+	) {
+		var chdirArgs []string
+		if len(chdir) > 0 {
+			chdirArgs = []string{"-chdir=" + chdir}
+		}
+		lintArgs := fmt.Sprintf("-lint=%s", strings.Join(lint, ","))
+		t.Run("init", func(t *testing.T) {
+			_, stderr, err := tf.Run(append(chdirArgs, "init", "-plugin-dir=./cache")...)
+			if err != nil {
+				t.Fatalf("unexpected init error: %s\nstderr:\n%s", err, stderr)
+			}
+		})
+		t.Run("validate", func(t *testing.T) {
+			stdout, stderr, err := tf.Run(append(chdirArgs, "validate", lintArgs)...)
+			combined := fmt.Sprintf("%s\n\n%s", stripAnsi(stdout), stripAnsi(stderr))
+			if err != nil {
+				t.Errorf("expected no error during validate but got %q. output:\n%s", err, combined)
+			}
+			entriesChecker := outputEntriesChecker(expectedPlanOutput)
+			entriesChecker.check(t, "plan", combined)
+		})
+		t.Run("plan", func(t *testing.T) {
+			stdout, stderr, err := tf.Run(append(chdirArgs, "plan", lintArgs, "-out=tfplan")...)
+			combined := fmt.Sprintf("%s\n\n%s", stripAnsi(stdout), stripAnsi(stderr))
+			if err != nil {
+				t.Errorf("expected no error during plan but got %q. output:\n%s", err, combined)
+			}
+			entriesChecker := outputEntriesChecker(expectedPlanOutput)
+			entriesChecker.check(t, "plan", combined)
+		})
+		t.Run("apply", func(t *testing.T) {
+			stdout, stderr, err := tf.Run(append(chdirArgs, "apply", lintArgs, "-auto-approve", "tfplan")...)
+			combined := fmt.Sprintf("%s\n\n%s", stripAnsi(stdout), stripAnsi(stderr))
+			if err != nil {
+				t.Errorf("expected no error during apply but got %q. output:\n%s", err, combined)
+			}
+			entriesChecker := outputEntriesChecker(expectedApplyOutput)
+			entriesChecker.check(t, "apply", combined)
+		})
+		t.Run("refresh", func(t *testing.T) {
+			stdout, stderr, err := tf.Run(append(chdirArgs, "refresh", lintArgs)...)
+			combined := fmt.Sprintf("%s\n\n%s", stripAnsi(stdout), stripAnsi(stderr))
+			if err != nil {
+				t.Errorf("expected no error during refresh but got %q. output:\n%s", err, combined)
+			}
+			entriesChecker := outputEntriesChecker(expectedApplyOutput)
+			entriesChecker.check(t, "apply", combined)
+		})
+		t.Run("destroy", func(t *testing.T) {
+			stdout, stderr, err := tf.Run(append(chdirArgs, "destroy", "-auto-approve")...)
+			combined := fmt.Sprintf("%s\n\n%s", stripAnsi(stdout), stripAnsi(stderr))
+			if err != nil {
+				t.Errorf("expected to have no error during destroy. got %q instead. output:\n%s", err, combined)
+			}
+			entriesChecker := outputEntriesChecker(expectedDestroyOutput)
+			entriesChecker.check(t, "destroy", combined)
+		})
+	}
+	cases := map[string]struct {
+		chdir                 string
+		lint                  []string
+		expectedPlanOutput    []outputCheck
+		expectedApplyOutput   []outputCheck
+		expectedDestroyOutput []outputCheck
+	}{
+		"core:no-type-variable": {
+			lint: []string{"core:no-type-variable"},
+			expectedPlanOutput: []outputCheck{
+				outputCheckNumberOfOccurrences{"Experimental linting enabled", 1},
+				outputCheckNumberOfOccurrences{"3: variable \"no_type\"", 1},
+				outputCheckNumberOfOccurrences{"Variable with no type (core:no-type-variable)", 1},
+				outputCheckNumberOfOccurrences{"Warning:", 2}, // check all the issued linting diagnostics to be sure that there only the ones expected above
+			},
+			expectedApplyOutput: []outputCheck{
+				outputCheckNumberOfOccurrences{"Experimental linting enabled", 1},
+				outputCheckNumberOfOccurrences{"3: variable \"no_type\"", 1},
+				outputCheckNumberOfOccurrences{"Variable with no type (core:no-type-variable)", 1},
+				outputCheckNumberOfOccurrences{"Warning:", 2}, // check all the issued linting diagnostics to be sure that there only the ones expected above
+			},
+			expectedDestroyOutput: []outputCheck{
+				outputCheckDoesNotContain{"Warning:", true},
+			},
+		},
+		"core:unused-variable": {
+			lint: []string{"core:unused-variable"},
+			expectedPlanOutput: []outputCheck{
+				outputCheckNumberOfOccurrences{"Experimental linting enabled", 1},
+				outputCheckNumberOfOccurrences{"Input variable not used (core:unused-variable)", 2},
+				outputCheckNumberOfOccurrences{"3: variable \"no_type\"", 1},
+				outputCheckNumberOfOccurrences{"15: variable \"var_not_used_at_all\"", 1},
+				outputCheckNumberOfOccurrences{"Warning:", 3}, // check all the issued linting diagnostics to be sure that there only the ones expected above
+			},
+			expectedApplyOutput: []outputCheck{
+				outputCheckNumberOfOccurrences{"Experimental linting enabled", 1},
+				outputCheckNumberOfOccurrences{"Input variable not used (core:unused-variable)", 2},
+				outputCheckNumberOfOccurrences{"3: variable \"no_type\"", 1},
+				outputCheckNumberOfOccurrences{"15: variable \"var_not_used_at_all\"", 1},
+				outputCheckNumberOfOccurrences{"Warning:", 3}, // check all the issued linting diagnostics to be sure that there only the ones expected above
+			},
+			expectedDestroyOutput: []outputCheck{
+				outputCheckDoesNotContain{"Warning:", true},
+			},
+		},
+		"core:unused-local": {
+			lint: []string{"core:unused-local"},
+			expectedPlanOutput: []outputCheck{
+				outputCheckNumberOfOccurrences{"Experimental linting enabled", 1},
+				outputCheckNumberOfOccurrences{"Local value not used (core:unused-local)", 1},
+				outputCheckNumberOfOccurrences{"15:  local_not_used_at_all", 1},
+				outputCheckNumberOfOccurrences{"Warning:", 2}, // check all the issued linting diagnostics to be sure that there only the ones expected above
+			},
+			expectedApplyOutput: []outputCheck{
+				outputCheckNumberOfOccurrences{"Experimental linting enabled", 1},
+				outputCheckNumberOfOccurrences{"Local value not used (core:unused-local)", 1},
+				outputCheckNumberOfOccurrences{"15:  local_not_used_at_all", 1},
+				outputCheckNumberOfOccurrences{"Warning:", 2}, // check all the issued linting diagnostics to be sure that there only the ones expected above
+			},
+			expectedDestroyOutput: []outputCheck{
+				outputCheckDoesNotContain{"Warning:", true},
+			},
+		},
+		"core:count-instead-enabled": {
+			lint: []string{"core:count-instead-enabled"},
+			expectedPlanOutput: []outputCheck{
+				outputCheckNumberOfOccurrences{"Experimental linting enabled", 1},
+				outputCheckNumberOfOccurrences{"Could use enabled instead of count (core:count-instead-enabled)", 6},
+				outputCheckNumberOfOccurrences{"resource \"simple_resource\" \"res1\":", 1},
+				outputCheckNumberOfOccurrences{"data \"simple_resource\" \"res2\":", 1},
+				outputCheckNumberOfOccurrences{"ephemeral \"simple_resource\" \"res3\":", 1},
+				outputCheckNumberOfOccurrences{"resource \"simple_resource\" \"res4\":", 1},
+				outputCheckNumberOfOccurrences{"ephemeral \"simple_resource\" \"res5\":", 1},
+				outputCheckNumberOfOccurrences{"data \"simple_resource\" \"res6\":", 1},
+				outputCheckNumberOfOccurrences{"Warning:", 7}, // check all the issued linting diagnostics to be sure that there only the ones expected above
+			},
+			expectedApplyOutput: []outputCheck{
+				outputCheckNumberOfOccurrences{"Experimental linting enabled", 1},
+				outputCheckNumberOfOccurrences{"Could use enabled instead of count (core:count-instead-enabled)", 6},
+				outputCheckNumberOfOccurrences{"resource \"simple_resource\" \"res1\":", 1},
+				outputCheckNumberOfOccurrences{"data \"simple_resource\" \"res2\":", 1},
+				outputCheckNumberOfOccurrences{"ephemeral \"simple_resource\" \"res3\":", 1},
+				outputCheckNumberOfOccurrences{"resource \"simple_resource\" \"res4\":", 1},
+				outputCheckNumberOfOccurrences{"ephemeral \"simple_resource\" \"res5\":", 1},
+				outputCheckNumberOfOccurrences{"data \"simple_resource\" \"res6\":", 1},
+				outputCheckNumberOfOccurrences{"Warning:", 7}, // check all the issued linting diagnostics to be sure that there only the ones expected above
+			},
+			expectedDestroyOutput: []outputCheck{
+				outputCheckDoesNotContain{"Warning:", true},
+			},
+		},
+	}
+	for name, tt := range cases {
+		t.Run(name, func(t *testing.T) {
+			exec(
+				t,
+				tt.chdir,
+				tt.lint,
+				tt.expectedPlanOutput,
+				tt.expectedApplyOutput,
+				tt.expectedDestroyOutput,
+			)
+		})
+	}
+
+}
+
 func TestApplyPanic(t *testing.T) {
 	t.Parallel()
 
@@ -796,6 +973,24 @@ func buildSimpleProvider(t *testing.T, version string, workdir string, buildOutN
 	}
 }
 
+type outputCheckNumberOfOccurrences struct {
+	token             string
+	wantedOccurrences int
+}
+
+func (oe outputCheckNumberOfOccurrences) check(t *testing.T, hint, in string) {
+	var found int
+	for line := range strings.SplitSeq(in, "\n") {
+		if strings.Contains(line, oe.token) {
+			found++
+		}
+	}
+
+	if oe.wantedOccurrences != found {
+		t.Errorf("[%s] different number of occurrences %q. Wanted %d but got %d\nout:%s", hint, oe.token, oe.wantedOccurrences, found, in)
+	}
+}
+
 type outputCheckContains struct {
 	variants []string
 	strict   bool
@@ -855,3 +1050,72 @@ func mustResourceInstanceAddr(t *testing.T, s string) addrs.AbsResourceInstance 
 	}
 	return addr
 }
+
+func TestCheckForgetWarnings(t *testing.T) {
+	t.Parallel()
+
+	skipIfCannotAccessNetwork(t)
+
+	fixturePath := filepath.Join("testdata", "empty")
+	tf := e2e.NewBinary(t, tofuBin, fixturePath)
+
+	config1 := `
+resource "null_resource" "test" {
+  triggers = {
+    value = "hello"
+  }
+}
+`
+	err := os.WriteFile(tf.Path("main.tf"), []byte(config1), 0644)
+	if err != nil {
+		t.Fatalf("failed to write main.tf: %s", err)
+	}
+
+	_, stderr, err := tf.Run("init")
+	if err != nil {
+		t.Fatalf("unexpected init error: %s\nstderr:\n%s", err, stderr)
+	}
+
+	_, stderr, err = tf.Run("apply", "-auto-approve")
+	if err != nil {
+		t.Fatalf("unexpected apply error: %s\nstderr:\n%s", err, stderr)
+	}
+
+	config2 := `
+removed {
+  from = null_resource.test
+
+  lifecycle {
+    destroy = false
+  }
+}
+`
+	err = os.WriteFile(tf.Path("main.tf"), []byte(config2), 0644)
+	if err != nil {
+		t.Fatalf("failed to write main.tf: %s", err)
+	}
+
+	stdout, stderr, err := tf.Run("plan")
+	if err != nil {
+		t.Fatalf("unexpected plan error: %s\nstderr:\n%s", err, stderr)
+	}
+
+	warningCount := strings.Count(stdout, "Warning:")
+	if warningCount != 1 {
+		t.Errorf("expected exactly 1 warning in output, got %d. Output:\n%s", warningCount, stdout)
+	}
+
+	errorCount := strings.Count(stdout, "Error:")
+	if errorCount != 0 {
+		t.Errorf("expected 0 errors in output, got %d. Output:\n%s", errorCount, stdout)
+	}
+
+	if !strings.Contains(stdout, "Objects will be removed from state") {
+		t.Errorf("expected warning message 'Objects will be removed from state' in stdout. Output:\n%s", stdout)
+	}
+
+	if !strings.Contains(stdout, "After this plan is applied") || !strings.Contains(stdout, "will no longer be managed by OpenTofu") {
+		t.Errorf("expected warning message detail in stdout. Output:\n%s", stdout)
+	}
+}
+

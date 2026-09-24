@@ -14,8 +14,6 @@ import (
 	"strings"
 
 	"github.com/hashicorp/hcl/v2"
-	"github.com/mitchellh/cli"
-	"github.com/opentofu/opentofu/internal/command/flags"
 	"github.com/opentofu/svchost"
 	"github.com/posener/complete"
 	"github.com/zclconf/go-cty/cty"
@@ -25,10 +23,12 @@ import (
 	backendInit "github.com/opentofu/opentofu/internal/backend/init"
 	"github.com/opentofu/opentofu/internal/cloud"
 	"github.com/opentofu/opentofu/internal/command/arguments"
+	"github.com/opentofu/opentofu/internal/command/flags"
 	"github.com/opentofu/opentofu/internal/command/views"
 	"github.com/opentofu/opentofu/internal/configs"
 	"github.com/opentofu/opentofu/internal/configs/configschema"
 	"github.com/opentofu/opentofu/internal/encryption"
+	"github.com/opentofu/opentofu/internal/experiments"
 	"github.com/opentofu/opentofu/internal/getproviders"
 	"github.com/opentofu/opentofu/internal/providercache"
 	"github.com/opentofu/opentofu/internal/states"
@@ -39,51 +39,47 @@ import (
 	tfversion "github.com/opentofu/opentofu/version"
 )
 
+func InitCommander() Command {
+	cmd := Command{
+		Name:  "init",
+		Short: "Prepare your working directory for other commands",
+		Long: `Initialize a new or existing OpenTofu working directory by creating initial files, loading any remote state, downloading modules, etc.
+
+This is the first command that should be run for any new or existing OpenTofu configuration per machine. This sets up all the local data necessary to run OpenTofu that is typically not committed to version control.
+
+This command is always safe to run multiple times. Though subsequent runs may give errors, this command will never delete your configuration or state. Even so, if you have important information, please back it up prior to running this command, just in case.`,
+		GroupID: MainCommandGroup.ID,
+
+		DiagsWithNewline: true,
+	}
+
+	args := arguments.BindInit(&cmd.CommandLine)
+	cmd.Run = func(meta Meta) int {
+		c := InitCommand{meta}
+		view := views.NewInit(args.View, meta.View)
+		view.Diagnostics(c.platformSupportWarnings())
+		return c.Execute(args, view)
+	}
+
+	return cmd
+}
+
 // InitCommand is a Command implementation that takes a Terraform
 // module and clones it to the working directory.
 type InitCommand struct {
 	Meta
 }
 
-func (c *InitCommand) Run(rawArgs []string) int {
+func (c InitCommand) Execute(args *arguments.Init, view views.Init) int {
+	var diags tfdiags.Diagnostics
+
 	ctx := c.CommandContext()
 	ctx, span := tracing.Tracer().Start(ctx, "Init")
 	defer span.End()
 
-	// new view
-	common, rawArgs := arguments.ParseView(rawArgs)
-	c.View.Configure(common)
-	// Because the legacy UI was using println to show diagnostics and the new view is using, by default, print,
-	// in order to keep functional parity, we setup the view to add a new line after each diagnostic.
-	c.View.DiagsWithNewline()
-
-	// Parse and validate flags
-	args, closer, diags := arguments.ParseInit(rawArgs)
-	defer closer()
-
-	// Instantiate the view, even if there are flag errors, so that we render
-	// diagnostics according to the desired view
-	view := views.NewInit(args.ViewOptions, c.View)
-
-	if diags.HasErrors() {
-		view.Diagnostics(diags)
-		if args.ViewOptions.ViewType == arguments.ViewJSON {
-			return 1
-		}
-		return cli.RunResultHelp
-	}
-
-	// FIXME: the -input flag value is needed to initialize the backend and the
-	// operation, but there is no clear path to pass this value down, so we
-	// continue to mutate the Meta object state for now.
-	c.Meta.input = args.ViewOptions.InputEnabled
-
 	if len(args.FlagPluginPath) > 0 {
 		c.pluginPath = args.FlagPluginPath
 	}
-	c.Meta.variableArgs = args.Vars.All()
-	c.Meta.stateArgs = *args.State
-	c.Meta.backendArgs = *args.Backend
 
 	// This gets the current directory as full path.
 	path := c.WorkingDir.NormalizePath(c.WorkingDir.RootModuleDir())
@@ -165,12 +161,36 @@ To initialize the configuration already in this working directory, omit the
 		return 1
 	}
 	if empty {
+		view.Diagnostics(diags) // just in case there are warnings
 		view.InitialisedFromEmptyDir()
 		return 0
 	}
 
+	// Check for experiment that requires alternate load order
+	rootModCheckExperiments, checkExperimentsDiags := c.configLoader().LoadConfigDirWithTests(path, args.TestsDirectory)
+	symbolLibrariesEnabled := rootModCheckExperiments != nil && rootModCheckExperiments.LanguageExperiments.Has(experiments.SymbolLibraries)
+	if symbolLibrariesEnabled && args.FlagGet {
+		if checkExperimentsDiags.HasErrors() {
+			view.ConfigError()
+			diags = diags.Append(checkExperimentsDiags)
+			view.Diagnostics(diags)
+			return 1
+		}
+		modsOutput, modsAbort, modsDiags := c.getModules(ctx, path, args.TestsDirectory, rootModCheckExperiments, args.FlagUpgrade, view)
+		diags = diags.Append(modsDiags)
+		if modsAbort || modsDiags.HasErrors() {
+			tracing.SetSpanError(span, modsDiags)
+			view.Diagnostics(diags)
+			return 1
+		}
+		if modsOutput {
+			header = true
+		}
+	}
+
 	// Load just the root module to begin backend and module initialization
 	rootModEarly, earlyConfDiags := c.loadSingleModuleWithTests(ctx, path, args.TestsDirectory)
+	earlyConfDiags = earlyConfDiags.StrictDeduplicateMerge(tfdiags.New(checkExperimentsDiags)) // Merge these because of the lazy config loader
 	if earlyConfDiags.HasErrors() {
 		// Historical note: prior to OpenTofu v1.12, we took some extraordinary
 		// effort here to return any backend-related errors in preference to
@@ -267,7 +287,7 @@ To initialize the configuration already in this working directory, omit the
 		state = sMgr.State()
 	}
 
-	if args.FlagGet {
+	if !symbolLibrariesEnabled && args.FlagGet {
 		modsOutput, modsAbort, modsDiags := c.getModules(ctx, path, args.TestsDirectory, rootModEarly, args.FlagUpgrade, view)
 		diags = diags.Append(modsDiags)
 		if modsAbort || modsDiags.HasErrors() {
@@ -377,7 +397,7 @@ func (c *InitCommand) getModules(ctx context.Context, path, testsDir string, ear
 		}
 	}
 
-	if len(earlyRoot.ModuleCalls) == 0 && !testModules {
+	if len(earlyRoot.ModuleCalls) == 0 && len(earlyRoot.SymbolCalls) == 0 && !testModules {
 		// Nothing to do
 		return false, false, nil
 	}
@@ -1174,6 +1194,33 @@ func (c *InitCommand) AutocompleteArgs() complete.Predictor {
 	return complete.PredictDirs("")
 }
 
+func (c *InitCommand) platformSupportWarnings() tfdiags.Diagnostics {
+	var diags tfdiags.Diagnostics
+	if !tfversion.IsOfficialBuild() {
+		// platform support warnings are irrelevant for third-party builds,
+		// because they can produce release packages for whatever targets
+		// they are willing to maintain support for.
+		return diags
+	}
+	// This is not active yet but is a placeholder for a warning to be added
+	// later once one of the various possible triggers for end of darwin_amd64
+	// support occurs. Most likely this will come after the last macOS release
+	// which supports this platform is no longer supported by Apple.
+	/*
+		if runtime.GOARCH == "darwin" || runtime.GOARCH == "amd64" {
+			diags = diags.Append(tfdiags.Sourceless(
+				tfdiags.Warning,
+				"Support for macOS on Intel CPUs is ending soon",
+				fmt.Sprintf(
+					"OpenTofu v1.TODO is the last release series that will include official release packages for macOS on Intel CPUs.\n\nWe recommend planning to migrate either to macOS on Apple Silicon or to another operating system that's still supported on Intel CPUs, such as Linux.",
+					getproviders.CurrentPlatform,
+				),
+			))
+		}
+	*/
+	return diags
+}
+
 func (c *InitCommand) AutocompleteFlags() complete.Flags {
 	return complete.Flags{
 		"-backend":        completePredictBoolean,
@@ -1191,129 +1238,6 @@ func (c *InitCommand) AutocompleteFlags() complete.Flags {
 		"-migrate-state":  complete.PredictNothing,
 		"-upgrade":        completePredictBoolean,
 	}
-}
-
-func (c *InitCommand) Help() string {
-	helpText := `
-Usage: tofu [global options] init [options]
-
-  Initialize a new or existing OpenTofu working directory by creating
-  initial files, loading any remote state, downloading modules, etc.
-
-  This is the first command that should be run for any new or existing
-  OpenTofu configuration per machine. This sets up all the local data
-  necessary to run OpenTofu that is typically not committed to version
-  control.
-
-  This command is always safe to run multiple times. Though subsequent runs
-  may give errors, this command will never delete your configuration or
-  state. Even so, if you have important information, please back it up prior
-  to running this command, just in case.
-
-Options:
-
-  -backend=false          Disable backend or cloud backend initialization
-                          for this configuration and use what was previously
-                          initialized instead.
-
-                          aliases: -cloud=false
-
-  -backend-config=path    Configuration to be merged with what is in the
-                          configuration file's 'backend' block. This can be
-                          either a path to an HCL file with key/value
-                          assignments (same format as terraform.tfvars) or a
-                          'key=value' format, and can be specified multiple
-                          times. The backend type must be in the configuration
-                          itself.
-
-  -compact-warnings       If OpenTofu produces any warnings that are not
-                          accompanied by errors, show them in a more compact
-                          form that includes only the summary messages.
-
-  -consolidate-warnings   If OpenTofu produces any warnings, no consolidation
-                          will be performed. All locations, for all warnings
-                          will be listed. Enabled by default.
-
-  -consolidate-errors     If OpenTofu produces any errors, no consolidation
-                          will be performed. All locations, for all errors
-                          will be listed. Disabled by default
-
-  -force-copy             Suppress prompts about copying state data when
-                          initializing a new state backend. This is
-                          equivalent to providing a "yes" to all confirmation
-                          prompts.
-
-  -from-module=SOURCE     Copy the contents of the given module into the target
-                          directory before initialization.
-
-  -get=false              Disable downloading modules for this configuration.
-
-  -input=false            Disable interactive prompts. Note that some actions may
-                          require interactive prompts and will error if input is
-                          disabled.
-
-  -lock=false             Don't hold a state lock during backend migration.
-                          This is dangerous if others might concurrently run
-                          commands against the same workspace.
-
-  -lock-timeout=0s        Duration to retry a state lock.
-
-  -no-color               If specified, output won't contain any color.
-
-  -plugin-dir             Directory containing plugin binaries. This overrides all
-                          default search paths for plugins, and prevents the
-                          automatic installation of plugins. This flag can be used
-                          multiple times.
-
-  -reconfigure            Reconfigure a backend, ignoring any saved
-                          configuration.
-
-  -migrate-state          Reconfigure a backend, and attempt to migrate any
-                          existing state.
-
-  -upgrade                Install the latest module and provider versions
-                          allowed within configured constraints, overriding the
-                          default behavior of selecting exactly the version
-                          recorded in the dependency lockfile.
-
-  -lockfile=MODE          Set a dependency lockfile mode.
-                          Currently only "readonly" is valid.
-
-  -ignore-remote-version  A rare option used for cloud backend and the remote backend
-                          only. Set this to ignore checking that the local and remote
-                          OpenTofu versions use compatible state representations, making
-                          an operation proceed even when there is a potential mismatch.
-                          See the documentation on configuring OpenTofu with
-                          cloud backend for more information.
-
-  -test-directory=path    Set the OpenTofu test directory, defaults to "tests". When set, the
-                          test command will search for test files in the current directory and
-                          in the one specified by the flag.
-
-  -json                   Produce output in a machine-readable JSON format, 
-                          suitable for use in text editor integrations and other 
-                          automated systems. Always disables color.
-
-  -json-into=out.json     Produce the same output as -json, but sent directly
-                          to the given file. This allows automation to preserve
-                          the original human-readable output streams, while
-                          capturing more detailed logs for machine analysis.
-
-  -var 'foo=bar'          Set a value for one of the input variables in the root
-                          module of the configuration. Use this option more than
-                          once to set more than one variable.
-
-  -var-file=filename      Load variable values from the given file, in addition
-                          to the default files terraform.tfvars and *.auto.tfvars.
-                          Use this option more than once to include more than one
-                          variables file.
-
-`
-	return strings.TrimSpace(helpText)
-}
-
-func (c *InitCommand) Synopsis() string {
-	return "Prepare your working directory for other commands"
 }
 
 // providerProtocolTooOld is a message sent to the CLI UI if the provider's

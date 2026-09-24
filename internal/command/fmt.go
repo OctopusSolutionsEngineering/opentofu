@@ -19,7 +19,6 @@ import (
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/hashicorp/hcl/v2/hclwrite"
-	"github.com/mitchellh/cli"
 	"github.com/opentofu/opentofu/internal/command/arguments"
 	"github.com/opentofu/opentofu/internal/command/views"
 	"github.com/opentofu/opentofu/internal/configs"
@@ -36,6 +35,27 @@ var (
 	}
 )
 
+func FmtCommander(input io.Reader) Command {
+	cmd := Command{
+		Name:  "fmt",
+		Short: "Reformat your configuration in the standard style",
+		Long: `Rewrites all OpenTofu configuration files to a canonical format. All configuration files (.tf), variables files (.tfvars), and testing files (.tftest.hcl) are updated. JSON files (.tf.json, .tfvars.json, or .tftest.json) are not modified.
+
+By default, fmt scans the current directory for configuration files. If you provide a directory for the target argument, then fmt will scan that directory instead. If you provide a file, then fmt will process just that file. If you provide a single dash ("-"), then fmt will read from standard input (STDIN).
+
+The content must be in the OpenTofu language native syntax; JSON is not supported.`,
+
+		DiagsWithNewline: true,
+	}
+
+	args := arguments.BindFmt(&cmd.CommandLine)
+	cmd.Run = func(meta Meta) int {
+		return FmtCommand{meta, input}.Execute(args, views.NewFmt(meta.View))
+	}
+
+	return cmd
+}
+
 // FmtCommand is a Command implementation that rewrites OpenTofu config
 // files to a canonical format and style.
 type FmtCommand struct {
@@ -43,28 +63,9 @@ type FmtCommand struct {
 	input io.Reader // STDIN if nil
 }
 
-func (c *FmtCommand) Run(rawArgs []string) int {
+func (c FmtCommand) Execute(args *arguments.Fmt, view views.Fmt) int {
 	if c.input == nil {
 		c.input = os.Stdin
-	}
-
-	// new view
-	common, rawArgs := arguments.ParseView(rawArgs)
-	c.View.Configure(common)
-	// Because the legacy UI was using println to show diagnostics and the new view is using, by default, print,
-	// in order to keep functional parity, we setup the view to add a new line after each diagnostic.
-	c.View.DiagsWithNewline()
-
-	// Parse and validate flags
-	args, closer, diags := arguments.ParseFmt(rawArgs)
-	defer closer()
-
-	// Instantiate the view, even if there are flag errors, so that we render
-	// diagnostics according to the desired view
-	view := views.NewFmt(c.View)
-	if diags.HasErrors() {
-		view.Diagnostics(diags)
-		return cli.RunResultHelp
 	}
 
 	var output io.Writer
@@ -79,7 +80,7 @@ func (c *FmtCommand) Run(rawArgs []string) int {
 		output = view.UserOutputWriter()
 	}
 
-	diags = diags.Append(c.fmt(args.Paths, c.input, output, *args))
+	diags := c.fmt(args.Paths, c.input, output, *args)
 	view.Diagnostics(diags)
 	if diags.HasErrors() {
 		return 2
@@ -119,7 +120,6 @@ func (c *FmtCommand) fmt(paths []string, stdin io.Reader, stdout io.Writer, args
 	}
 
 	for _, path := range paths {
-		path = c.Meta.WorkingDir.NormalizePath(path)
 		info, err := os.Stat(path)
 		if err != nil {
 			diags = diags.Append(tfdiags.Sourceless(
@@ -148,7 +148,7 @@ func (c *FmtCommand) fmt(paths []string, stdin io.Reader, stdout io.Writer, args
 						continue
 					}
 
-					fileDiags := c.processFile(c.Meta.WorkingDir.NormalizePath(path), f, stdout, args)
+					fileDiags := c.processFile(path, f, stdout, args)
 					diags = diags.Append(fileDiags)
 					_ = f.Close()
 
@@ -312,7 +312,7 @@ func (c *FmtCommand) processDir(path string, stdout io.Writer, args arguments.Fm
 					continue
 				}
 
-				fileDiags := c.processFile(c.Meta.WorkingDir.NormalizePath(subPath), f, stdout, args)
+				fileDiags := c.processFile(subPath, f, stdout, args)
 				diags = diags.Append(fileDiags)
 				_ = f.Close()
 
@@ -583,49 +583,6 @@ func (c *FmtCommand) trimNewlines(tokens hclwrite.Tokens) hclwrite.Tokens {
 		}
 	}
 	return tokens[start:end]
-}
-
-func (c *FmtCommand) Help() string {
-	helpText := `
-Usage: tofu [global options] fmt [options] [target...]
-
-  Rewrites all OpenTofu configuration files to a canonical format. All
-  configuration files (.tf), variables files (.tfvars), and testing files 
-  (.tftest.hcl) are updated. JSON files (.tf.json, .tfvars.json, or 
-  .tftest.json) are not modified.
-
-  By default, fmt scans the current directory for configuration files. If you
-  provide a directory for the target argument, then fmt will scan that
-  directory instead. If you provide a file, then fmt will process just that
-  file. If you provide a single dash ("-"), then fmt will read from standard
-  input (STDIN).
-
-  The content must be in the OpenTofu language native syntax; JSON is not
-  supported.
-
-Options:
-
-  -list=false    Don't list files whose formatting differs
-                 (always disabled if using STDIN)
-
-  -write=false   Don't write to source files
-                 (always disabled if using STDIN or -check)
-
-  -diff          Display diffs of formatting changes
-
-  -check         Check if the input is formatted. Exit status will be 0 if all
-                 input is properly formatted and non-zero otherwise.
-
-  -no-color      If specified, output won't contain any color.
-
-  -recursive     Also process files in subdirectories. By default, only the
-                 given directory (or current directory) is processed.
-`
-	return strings.TrimSpace(helpText)
-}
-
-func (c *FmtCommand) Synopsis() string {
-	return "Reformat your configuration in the standard style"
 }
 
 func withTempFile(b []byte, fn func(*os.File) error) error {

@@ -16,7 +16,6 @@ import (
 
 	"github.com/apparentlymart/go-versions/versions"
 	"github.com/hashicorp/go-getter"
-	"github.com/mitchellh/cli"
 	"github.com/opentofu/opentofu/internal/addrs"
 	"github.com/opentofu/opentofu/internal/command/arguments"
 	"github.com/opentofu/opentofu/internal/command/views"
@@ -26,6 +25,25 @@ import (
 	"github.com/opentofu/opentofu/internal/tfdiags"
 )
 
+func ProvidersMirrorCommander() Command {
+	cmd := Command{
+		Name:  "mirror",
+		Short: "Save local copies of all required provider plugins",
+		Long: `Populates a local directory with copies of the provider plugins needed for the current configuration, so that the directory can be used either directly as a filesystem mirror or as the basis for a network mirror and thus obtain  those providers without access to their origin registries in future.
+
+The mirror directory will contain JSON index files that can be published along with the mirrored packages on a static HTTP file server to produce a network mirror. Those index files will be ignored if the directory is used instead as a local filesystem mirror.`,
+
+		DiagsWithNewline: true,
+	}
+
+	args := arguments.BindProvidersMirror(&cmd.CommandLine)
+	cmd.Run = func(meta Meta) int {
+		return ProvidersMirrorCommand{meta}.Execute(args, views.NewProvidersMirror(args.View, meta.View))
+	}
+
+	return cmd
+}
+
 // ProvidersMirrorCommand is a Command implementation that implements the
 // "tofu providers mirror" command, which populates a directory with
 // local copies of provider plugins needed by the current configuration so
@@ -34,33 +52,8 @@ type ProvidersMirrorCommand struct {
 	Meta
 }
 
-func (c *ProvidersMirrorCommand) Synopsis() string {
-	return "Save local copies of all required provider plugins"
-}
-
-func (c *ProvidersMirrorCommand) Run(rawArgs []string) int {
-	// new view
-	common, rawArgs := arguments.ParseView(rawArgs)
-	c.View.Configure(common)
-	// Because the legacy UI was using println to show diagnostics and the new view is using, by default, print,
-	// in order to keep functional parity, we setup the view to add a new line after each diagnostic.
-	c.View.DiagsWithNewline()
-
-	// Parse and validate flags
-	args, closer, diags := arguments.ParseProvidersMirror(rawArgs)
-	defer closer()
-
-	// Instantiate the view, even if there are flag errors, so that we render
-	// diagnostics according to the desired view
-	view := views.NewProvidersMirror(args.ViewOptions, c.View)
-	if diags.HasErrors() {
-		view.Diagnostics(diags)
-		if args.ViewOptions.ViewType == arguments.ViewJSON {
-			return 1 // in case it's json, do not print the help of the command
-		}
-		return cli.RunResultHelp
-	}
-	c.Meta.variableArgs = args.Vars.All()
+func (c ProvidersMirrorCommand) Execute(args *arguments.ProvidersMirror, view views.ProvidersMirror) int {
+	var diags tfdiags.Diagnostics
 
 	outputDir := args.Directory
 
@@ -295,8 +288,8 @@ func (c *ProvidersMirrorCommand) Run(rawArgs []string) int {
 		indexDir := filepath.Dir(getproviders.PackedFilePathForPackage(
 			outputDir, provider, versions.Unspecified, getproviders.CurrentPlatform,
 		))
-		indexVersions := map[string]interface{}{}
-		indexArchives := map[getproviders.Version]map[string]interface{}{}
+		indexVersions := map[string]any{}
+		indexArchives := map[getproviders.Version]map[string]any{}
 		for _, meta := range metas {
 			archivePath, ok := meta.Location.(getproviders.PackageLocalArchive)
 			if !ok {
@@ -328,16 +321,16 @@ func (c *ProvidersMirrorCommand) Run(rawArgs []string) int {
 				hashes = append(hashes, hash.String())
 			}
 			slices.Sort(hashes)
-			indexVersions[meta.Version.String()] = map[string]interface{}{}
+			indexVersions[meta.Version.String()] = map[string]any{}
 			if _, ok := indexArchives[version]; !ok {
-				indexArchives[version] = map[string]interface{}{}
+				indexArchives[version] = map[string]any{}
 			}
-			indexArchives[version][platform.String()] = map[string]interface{}{
+			indexArchives[version][platform.String()] = map[string]any{
 				"url":    archiveFilename, // a relative URL from the index file's URL
 				"hashes": hashes,          // an array to allow for additional hash formats in future
 			}
 		}
-		mainIndex := map[string]interface{}{
+		mainIndex := map[string]any{
 			"versions": indexVersions,
 		}
 		mainIndexJSON, err := json.MarshalIndent(mainIndex, "", "  ")
@@ -362,7 +355,7 @@ func (c *ProvidersMirrorCommand) Run(rawArgs []string) int {
 			))
 		}
 		for version, archiveIndex := range indexArchives {
-			versionIndex := map[string]interface{}{
+			versionIndex := map[string]any{
 				"archives": archiveIndex,
 			}
 			versionIndexJSON, err := json.MarshalIndent(versionIndex, "", "  ")
@@ -387,52 +380,4 @@ func (c *ProvidersMirrorCommand) Run(rawArgs []string) int {
 		return 1
 	}
 	return 0
-}
-
-func (c *ProvidersMirrorCommand) Help() string {
-	return `
-Usage: tofu [global options] providers mirror [options] <target-dir>
-
-  Populates a local directory with copies of the provider plugins needed for
-  the current configuration, so that the directory can be used either directly
-  as a filesystem mirror or as the basis for a network mirror and thus obtain
-  those providers without access to their origin registries in future.
-
-  The mirror directory will contain JSON index files that can be published
-  along with the mirrored packages on a static HTTP file server to produce
-  a network mirror. Those index files will be ignored if the directory is
-  used instead as a local filesystem mirror.
-
-Options:
-
-  -platform=os_arch  Choose which target platform to build a mirror for.
-                     By default OpenTofu will obtain plugin packages
-                     suitable for the platform where you run this command.
-                     Use this flag multiple times to include packages for
-                     multiple target systems.
-
-                     Target names consist of an operating system and a CPU
-                     architecture. For example, "linux_amd64" selects the
-                     Linux operating system running on an AMD64 or x86_64
-                     CPU. Each provider is available only for a limited
-                     set of target platforms.
-
-  -var 'foo=bar'     Set a value for one of the input variables in the root
-                     module of the configuration. Use this option more than
-                     once to set more than one variable.
-
-  -var-file=filename Load variable values from the given file, in addition
-                     to the default files terraform.tfvars and *.auto.tfvars.
-                     Use this option more than once to include more than one
-                     variables file.
-
-  -json               Produce output in a machine-readable JSON format, 
-                      suitable for use in text editor integrations and other 
-                      automated systems. Always disables color.
-
-  -json-into=out.json Produce the same output as -json, but sent directly
-                      to the given file. This allows automation to preserve
-                      the original human-readable output streams, while
-                      capturing more detailed logs for machine analysis.
-`
 }

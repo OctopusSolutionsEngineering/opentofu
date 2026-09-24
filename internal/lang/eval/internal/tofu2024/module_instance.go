@@ -7,7 +7,6 @@ package tofu2024
 
 import (
 	"context"
-	"fmt"
 	"iter"
 	"maps"
 
@@ -21,6 +20,7 @@ import (
 	"github.com/opentofu/opentofu/internal/lang/eval/internal/evalglue"
 	"github.com/opentofu/opentofu/internal/lang/exprs"
 	"github.com/opentofu/opentofu/internal/lang/grapheval"
+	"github.com/opentofu/opentofu/internal/refactoring"
 	"github.com/opentofu/opentofu/internal/tfdiags"
 )
 
@@ -39,6 +39,8 @@ type CompiledModuleInstance struct {
 	moduleCallNodes     map[addrs.ModuleCall]*configgraph.ModuleCall
 	providerConfigNodes map[addrs.LocalProviderConfig]*configgraph.ProviderConfig
 	providerLocalNames  map[addrs.Provider]string
+
+	moveStatements []refactoring.MoveStatement
 
 	missingProviders rootMissingProviders
 
@@ -137,17 +139,7 @@ func (c *CompiledModuleInstance) ResourceInstanceObjectMeta(ctx context.Context,
 	// methods because our caller is expected to collect them separately
 	// using [CompiledModuleInstance.CheckAll].
 
-	preventDestroyVal, _, _ := rsrc.PreventDestroy(ctx)
-	preventDestroy, _ := exprs.DeriveFromValue(preventDestroyVal, func(v cty.Value) (bool, error) {
-		if v.True() {
-			return true, nil
-		}
-		if v.False() {
-			return false, nil
-		}
-		// No other value is expected, based on the documentation of [configgraph.Resource.PreventDestroy].
-		panic(fmt.Sprintf("method PreventDestroy for %s returned unexpected value %#v", addr.InstanceAddr.Resource, v))
-	})
+	preventDestroy, _, _ := rsrc.PreventDestroy(ctx)
 	ret.DeletionInvalid = preventDestroy
 
 	destroyProvisioners := rsrc.DestroyProvisioners(ctx, addr.InstanceAddr)
@@ -161,10 +153,27 @@ func (c *CompiledModuleInstance) ResourceInstanceObjectMeta(ctx context.Context,
 		return ret
 	}
 
+	// TODO: Should ReplaceOrder actually be modeled as a resource-level
+	// setting rather than an instance-level setting? For now assuming not
+	// because for non-desired objects we'll use the value from the prior state
+	// instead anyway, but we should check whether the old runtime let the
+	// resource-level config "win" for an orphaned resource instance.
+	ret.ReplaceOrder, _, _ = inst.ReplaceOrder(ctx)
+
 	providerInst, _ := inst.ProviderInstance(ctx)
-	ret.ProviderInstance, _ = exprs.DeriveFromDerived(providerInst, func(providerInst *configgraph.ProviderInstance) (*addrs.AbsProviderInstanceCorrect, error) {
+	ret.ProviderInstance, _ = providerInst.Derive(func(providerInst *configgraph.ProviderInstance) (*addrs.AbsProviderInstanceCorrect, error) {
 		return &providerInst.Addr, nil
 	})
+
+	// TODO: "Provider" should probably be a resource-level setting rather than
+	// an instance-level setting, because all instances of a resource are
+	// required to have the same resource type and therefore the same provider
+	// even if they belong to different instances of that provider. Without
+	// this we can only rely on the state for determining the provider of
+	// something that is "orphaned", which'll make it harder for folks to get
+	// themselves out of a trap where the provider instance they most recently
+	// used is no longer present and cannot be re-added in place.
+	ret.Provider = inst.Provider
 
 	ret.PostCreateProvisioners = prepareResourceProvisioners(inst.CreateProvisioners)
 
@@ -374,5 +383,29 @@ func (c *CompiledModuleInstance) AnnounceAllGraphevalRequests(announce func(work
 	}
 	for _, n := range c.providerConfigNodes {
 		n.AnnounceAllGraphevalRequests(announce)
+	}
+}
+
+// GetMoveStatements implements evalglue.GetMoveStatements.
+func (c *CompiledModuleInstance) GetMoveStatements(ctx context.Context) iter.Seq[refactoring.MoveStatement] {
+	return func(yield func(refactoring.MoveStatement) bool) {
+		for _, moveStatement := range c.moveStatements {
+			if !yield(moveStatement) {
+				return
+			}
+		}
+		for callAddr := range c.ChildModuleCalls(ctx) {
+			for _, compiled := range c.ChildModuleInstancesForCall(ctx, callAddr) {
+				// Note: move statement addresses are already "unified" with their module address relative to the root
+				subModuleMoveStatements := compiled.GetMoveStatements(ctx)
+				for subModuleMoveStatement := range subModuleMoveStatements {
+					if !yield(subModuleMoveStatement) {
+						return
+					}
+				}
+				// We only need move statements from one module instance, so we break immediately.
+				break
+			}
+		}
 	}
 }

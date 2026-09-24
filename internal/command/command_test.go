@@ -26,7 +26,6 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/mitchellh/cli"
 	"github.com/opentofu/opentofu/internal/command/arguments"
 	"github.com/opentofu/svchost"
 	"github.com/opentofu/svchost/disco"
@@ -90,6 +89,14 @@ func TestMain(m *testing.M) {
 	backendInit.Init(nil)
 
 	os.Exit(m.Run())
+}
+
+// RunCommander handles simulating the arg handling that is typically available
+// through the cli package
+func RunCommander(t *testing.T, cmd Command, meta Meta, args []string) int {
+	diags := cmd.CommandLine.ParseDirect(t.Context(), args)
+	return RunCli("testing", cmd, meta, diags)
+
 }
 
 // tempWorkingDir constructs a workdir.Dir object referring to a newly-created
@@ -708,7 +715,7 @@ func testBackendState(t *testing.T, s *states.State, c int) (*clistate.CLIState,
 	backendConfig := &configs.Backend{
 		Type:   "http",
 		Config: configs.SynthBody("<testBackendState>", map[string]cty.Value{}),
-		Eval:   configs.NewStaticEvaluator(nil, configs.RootModuleCallForTesting()),
+		Eval:   configs.NewStaticEvaluator(nil, nil, configs.RootModuleCallForTesting()),
 	}
 	httpBackendInit, _ := backendInit.Backend("http")
 	b := httpBackendInit(encryption.StateEncryptionDisabled())
@@ -934,14 +941,6 @@ func normalizeJSON(t *testing.T, src []byte) string {
 		t.Fatalf("error normalizing JSON: %s", err)
 	}
 	return buf.String()
-}
-
-func mustResourceAddr(s string) addrs.ConfigResource {
-	addr, diags := addrs.ParseAbsResourceStr(s)
-	if diags.HasErrors() {
-		panic(diags.Err())
-	}
-	return addr.Config()
 }
 
 // This map from provider type name to namespace is used by the fake registry
@@ -1242,16 +1241,14 @@ func TestVarsParsing(t *testing.T) {
 		t.Chdir(td)
 		t.Cleanup(testStdinPipe(t, strings.NewReader("var.foo\nvar.snack\n")))
 		streams, done := terminal.StreamsForTesting(t)
-		c := &ConsoleCommand{
-			Meta: Meta{
-				WorkingDir:       workdir.NewDir("."),
-				testingOverrides: metaOverridesForProvider(p),
-				View:             views.NewView(streams),
-			},
+		m := Meta{
+			WorkingDir:       workdir.NewDir("."),
+			testingOverrides: metaOverridesForProvider(p),
+			View:             views.NewView(streams),
 		}
 
 		args := append([]string{"-no-color", "-lock=false"}, varArgs...)
-		code := c.Run(args)
+		code := RunCommander(t, ConsoleCommander(), m, args)
 		output := done(t)
 		if code != 0 {
 			t.Fatalf("bad: %d\n\n%s", code, output.Stderr())
@@ -1267,35 +1264,25 @@ func TestVarsParsing(t *testing.T) {
 	})
 
 	cases := map[string]struct {
-		cmdBuilder      func(m Meta) cli.Command
+		cmd             Command
 		expectedContent []string
 		confirmation    bool
 	}{
 		"plan": {
-			cmdBuilder: func(m Meta) cli.Command {
-				return &PlanCommand{m}
-			},
+			cmd: PlanCommander(),
 		},
 		"apply": {
-			cmdBuilder: func(m Meta) cli.Command {
-				return &ApplyCommand{Meta: m}
-			},
+			cmd:          ApplyCommander(),
 			confirmation: true,
 		},
 		"output": {
-			cmdBuilder: func(m Meta) cli.Command {
-				return &OutputCommand{m}
-			},
+			cmd: OutputCommander(),
 		},
 		"show": {
-			cmdBuilder: func(m Meta) cli.Command {
-				return &ShowCommand{Meta: m}
-			},
+			cmd: ShowCommander(),
 		},
 		"refresh": {
-			cmdBuilder: func(m Meta) cli.Command {
-				return &RefreshCommand{m}
-			},
+			cmd: RefreshCommander(),
 		},
 	}
 	for name, tc := range cases {
@@ -1309,13 +1296,12 @@ func TestVarsParsing(t *testing.T) {
 				testingOverrides: metaOverridesForProvider(p),
 				View:             view,
 			}
-			c := tc.cmdBuilder(m)
 
 			args := append([]string{"-no-color"}, varArgs...)
 			if tc.confirmation {
 				t.Cleanup(testInputMap(t, map[string]string{"approve": "yes"}))
 			}
-			code := c.Run(args)
+			code := RunCommander(t, tc.cmd, m, args)
 			output := done(t)
 			if code != 0 {
 				t.Fatalf("bad: %d\n\n%s", code, output.Stderr())

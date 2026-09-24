@@ -28,11 +28,6 @@ func maybeRunExperimentalNewRuntimeTests(m *testing.M) {
 		return // we'll just let the normal TestMain function handle things, then
 	}
 
-	// In normal builds we require setting a special linker flag to permit
-	// opting in to the experimental runtime shim, but for tests it's always
-	// allowed and just enabled on request.
-	SetExperimentalRuntimeAllowed(true)
-
 	status := m.Run()
 
 	// Before we exit we'll print some stats about how many times each of
@@ -81,23 +76,14 @@ var experimentalFlagSkipMu sync.Mutex
 var (
 	ExperimentalFlagUnknown = ExperimentalFlag{"Unknown", false}
 
-	ExperimentalBugExecGraph         = ExperimentalFlag{"Bug in generated Exec Graph", true}
-	ExperimentalBugDeclareProvider   = ExperimentalFlag{"Bug Declare Provider", true}
-	ExperimentalBugVariableInput     = ExperimentalFlag{"Bug Variable Input", true}
 	ExperimentalBugCancel            = ExperimentalFlag{"Bug Context Cancel", false}
-	ExperimentalBugStateProvider     = ExperimentalFlag{"Bug State Provider", true}
 	ExperimentalBugStateCBD          = ExperimentalFlag{"Bug CreateBeforeDestroy Not Tracked In State", false}
 	ExperimentalBugStateUpdateHook   = ExperimentalFlag{"Bug State Update Hook", false}
-	ExperimentalBugReferenceProvider = ExperimentalFlag{"Bug Reference Provider", true}
-	ExperimentalBugMissingProvider   = ExperimentalFlag{"Bug Missing Configuration For Provider", true}
 	ExperimentalBugMissingResource   = ExperimentalFlag{"Bug Missing Configuration For Resource Instance", false}
 	ExperimentalBugResourceReadNull  = ExperimentalFlag{"Bug Read Resource Deleted", false}
 	ExperimentalBugDataResource      = ExperimentalFlag{"Bug Data Resource", false}
-	ExperimentalBugVariableSensitive = ExperimentalFlag{"Bug Variables Declared as Sensitive", true}
 	ExperimentalBugResourceMarks     = ExperimentalFlag{"Bug Not Transferring Marks from Resource Instance Config Value to Final Value", false}
 	ExperimentalBugTaintOnCreateFail = ExperimentalFlag{"Bug Not Tainted When Create Fails", false}
-	ExperimentalBugForEach           = ExperimentalFlag{"Bug For Each", true}
-	ExperimentalBugSpuriousReplace   = ExperimentalFlag{"Bug Spurious Replace", true} // New runtime proposes replace where old runtime would've called for update
 	ExperimentalBugProviderPrivate   = ExperimentalFlag{"Bug Provider Private Data Not Preserved", false}
 	ExperimentalBugCircularReference = ExperimentalFlag{"Bug Circular Reference", false}
 
@@ -111,45 +97,31 @@ var (
 	ExperimentalChangeModuleOutput    = ExperimentalFlag{"Change Module Outputs (test only)", false}
 	ExperimentalChangeCursedSelfRef   = ExperimentalFlag{"Change Cursed Self Reference (legacy race condition)", false}
 
-	ExperimentalFeatureStateDependencies = ExperimentalFlag{"Missing State Dependencies", true}
-	ExperimentalFeatureProviderInstances = ExperimentalFlag{"Missing Provider Instances", true}
-	ExperimentalFeatureCBD               = ExperimentalFlag{"Missing Create Before Destroy", true}
-	ExperimentalFeatureDeposed           = ExperimentalFlag{"Missing Deposed", false}
-	ExperimentalFeatureCondition         = ExperimentalFlag{"Missing Pre/Post Conditions", false}
-	ExperimentalFeatureLocalState        = ExperimentalFlag{"Missing Store locals in state", false}
-	ExperimentalFeatureChecks            = ExperimentalFlag{"Missing Checks", false}
-	ExperimentalFeatureChanges           = ExperimentalFlag{"Missing Plan Changes", false}
-	ExperimentalFeatureDeprecated        = ExperimentalFlag{"Missing Deprecated", false}
-	ExperimentalFeatureImport            = ExperimentalFlag{"Missing Importing", false}
-	ExperimentalFeatureRefresh           = ExperimentalFlag{"Missing Refresh", false}
-	ExperimentalFeatureRefreshOnly       = ExperimentalFlag{"Missing Refresh-only Planning Mode", false}
-	ExperimentalFeatureValidate          = ExperimentalFlag{"Missing Validate", true}
-	ExperimentalFeatureDestroy           = ExperimentalFlag{"Missing Destroy-mode Planning", true}
-	ExperimentalFeatureMoved             = ExperimentalFlag{"Missing Moved", false}
-	ExperimentalFeatureRemoved           = ExperimentalFlag{"Missing Removed", false}
-	ExperimentalFeatureSkipDestroy       = ExperimentalFlag{"Missing Lifecycle Destroy", false}
-	ExperimentalFeatureUpgradeState      = ExperimentalFlag{"Missing Upgrade Resource State", true}
-	ExperimentalFeatureUpgradeUnwanted   = ExperimentalFlag{"Missing Upgrade Orphan or Deposed Resource Instance State", false}
-	ExperimentalFeatureHooks             = ExperimentalFlag{"Missing Hooks", true}
-	ExperimentalFeatureTarget            = ExperimentalFlag{"Missing Targeting", false}
-	ExperimentalFeatureReplaceTB         = ExperimentalFlag{"Missing replace_triggered_by", true}
-	ExperimentalFeatureProvisioner       = ExperimentalFlag{"Missing Provisioners", true}
-	ExperimentalFeatureDependsOn         = ExperimentalFlag{"Missing Depends On", true}
-	ExperimentalFeatureIgnoreChanges     = ExperimentalFlag{"Missing Ignore Changes", true}
-	ExperimentalFeatureVarCondition      = ExperimentalFlag{"Missing Variable Condiitions", false}
-	ExperimentalFeaturePathAttrs         = ExperimentalFlag{"Missing Path/Terraform/Tofu Attrs", true}
-	ExperimentalFeaturePreventDestroy    = ExperimentalFlag{"Missing Prevent Destroy", true}
-	ExperimentalFeaturePlannedState      = ExperimentalFlag{"Missing Planned State", false}
-	ExperimentalFeatureForceReplace      = ExperimentalFlag{"Missing Force Replace", true}
-	ExperimentalFeatureRootOutput        = ExperimentalFlag{"Missing Root Output", true}
-	ExperimentalFeatureSensitivity       = ExperimentalFlag{"Missing Sensitivity Handling", false}
-	ExperimentalFeatureSelfReference     = ExperimentalFlag{"Missing Self Reference", false}
-	ExperimentalFeatureProviderMeta      = ExperimentalFlag{"Missing Provider Meta", false}
-	ExperimentalFeatureTaint             = ExperimentalFlag{"Missing Taint", false}
-	ExperimentalFeatureErrorHandling     = ExperimentalFlag{"Missing Error Handling", false}
-	ExperimentalFeatureProviderFunctions = ExperimentalFlag{"Missing Provider Defined Functions", true}
-	ExperimentalFeatureProviderInput     = ExperimentalFlag{"Missing Provider Input Prompting", false}
-	ExperimentalFeatureModuleEnabled     = ExperimentalFlag{"Missing Module Lifecycle Enabled", false}
+	ExperimentalFeatureDeposed         = ExperimentalFlag{"Missing Deposed", false}
+	ExperimentalFeatureCondition       = ExperimentalFlag{"Missing Pre/Post Conditions", false}
+	ExperimentalFeatureLocalState      = ExperimentalFlag{"Missing Store locals in state", false}
+	ExperimentalFeatureChecks          = ExperimentalFlag{"Missing Checks", false}
+	ExperimentalFeatureChanges         = ExperimentalFlag{"Missing Plan Changes", false}
+	ExperimentalFeatureDeprecated      = ExperimentalFlag{"Missing Deprecated", false}
+	ExperimentalFeatureImport          = ExperimentalFlag{"Missing Importing", false}
+	ExperimentalFeatureLinting         = ExperimentalFlag{"Missing Linting", false}
+	ExperimentalFeatureRefresh         = ExperimentalFlag{"Missing Refresh", false}
+	ExperimentalFeatureRefreshOnly     = ExperimentalFlag{"Missing Refresh-only Planning Mode", false}
+	ExperimentalFeatureMoved           = ExperimentalFlag{"Missing Moved", true}
+	ExperimentalFeatureRemoved         = ExperimentalFlag{"Missing Removed", false}
+	ExperimentalFeatureSkipDestroy     = ExperimentalFlag{"Missing Lifecycle Destroy", false}
+	ExperimentalFeatureUpgradeUnwanted = ExperimentalFlag{"Missing Upgrade Orphan or Deposed Resource Instance State", false}
+	ExperimentalFeatureTarget          = ExperimentalFlag{"Missing Targeting", false}
+	ExperimentalFeatureVarCondition    = ExperimentalFlag{"Missing Variable Condiitions", false}
+	ExperimentalFeaturePlannedState    = ExperimentalFlag{"Missing Planned State", false}
+	ExperimentalFeatureSensitivity     = ExperimentalFlag{"Missing Sensitivity Handling", false}
+	ExperimentalFeatureSelfReference   = ExperimentalFlag{"Missing Self Reference", false}
+	ExperimentalFeatureProviderMeta    = ExperimentalFlag{"Missing Provider Meta", false}
+	ExperimentalFeatureTaint           = ExperimentalFlag{"Missing Taint", false}
+	ExperimentalFeatureErrorHandling   = ExperimentalFlag{"Missing Error Handling", false}
+	ExperimentalFeatureProviderInput   = ExperimentalFlag{"Missing Provider Input Prompting", false}
+	ExperimentalFeatureModuleEnabled   = ExperimentalFlag{"Missing Module Lifecycle Enabled", false}
+	ExperimentalFeatureActionReason    = ExperimentalFlag{"Missing ActionReason", false}
 
 	// Obsolete flags indicate a test which depends on a feature we do not
 	// intend to carry forward into the new engine

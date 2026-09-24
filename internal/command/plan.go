@@ -8,7 +8,6 @@ package command
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/opentofu/opentofu/internal/backend"
 	"github.com/opentofu/opentofu/internal/command/arguments"
@@ -18,34 +17,36 @@ import (
 	"github.com/opentofu/opentofu/internal/tfdiags"
 )
 
+func PlanCommander() Command {
+	cmd := Command{
+		Name:  "plan",
+		Short: "Show changes required by the current configuration",
+		Long: `Generates a speculative execution plan, showing what actions OpenTofu would take to apply the current configuration. This command will not actually perform the planned actions.
+
+You can optionally save the plan to a file, which you can then pass to the "apply" command to perform exactly the actions described in the plan.`,
+
+		GroupID: MainCommandGroup.ID,
+	}
+
+	args := arguments.BindPlan(&cmd.CommandLine)
+	cmd.Run = func(meta Meta) int {
+		return PlanCommand{meta}.Execute(args, views.NewPlan(args.View, meta.View))
+	}
+
+	return cmd
+}
+
 // PlanCommand is a Command implementation that compares a OpenTofu
 // configuration to an actual infrastructure and shows the differences.
 type PlanCommand struct {
 	Meta
 }
 
-func (c *PlanCommand) Run(rawArgs []string) int {
+func (c PlanCommand) Execute(args *arguments.Plan, view views.Plan) int {
+	var diags tfdiags.Diagnostics
 	ctx := c.CommandContext()
-
-	// Parse and apply global view arguments
-	common, rawArgs := arguments.ParseView(rawArgs)
-	c.View.Configure(common)
-
-	// Parse and validate flags
-	args, closer, diags := arguments.ParsePlan(rawArgs)
-	defer closer()
-
-	c.View.SetShowSensitive(args.ShowSensitive)
-
-	// Instantiate the view, even if there are flag errors, so that we render
-	// diagnostics according to the desired view
-	view := views.NewPlan(args.ViewOptions, c.View)
-
-	if diags.HasErrors() {
-		view.Diagnostics(diags)
-		view.HelpPrompt()
-		return 1
-	}
+	ctx = tfdiags.ContextWithLintFilterHints(ctx, args.View.LintInclude, args.View.LintExclude)
+	diags = diags.Append(tfdiags.ExperimentalLintWarn(ctx))
 
 	// Check for user-supplied plugin path
 	var err error
@@ -55,23 +56,7 @@ func (c *PlanCommand) Run(rawArgs []string) int {
 		return 1
 	}
 
-	// FIXME: the -input flag value is needed to initialize the backend and the
-	// operation, but there is no clear path to pass this value down, so we
-	// continue to mutate the Meta object state for now.
-	c.Meta.input = args.ViewOptions.InputEnabled
-
-	// FIXME: the -parallelism flag is used to control the concurrency of
-	// OpenTofu operations. At the moment, this value is used both to
-	// initialize the backend via the ContextOpts field inside CLIOpts, and to
-	// set a largely unused field on the Operation request. Again, there is no
-	// clear path to pass this value down, so we continue to mutate the Meta
-	// object state for now.
-	c.Meta.parallelism = args.Operation.Parallelism
-
 	diags = diags.Append(c.providerDevOverrideRuntimeWarnings())
-
-	// Inject variables from args into meta for static evaluation
-	c.Meta.variableArgs = args.Vars.All()
 
 	// Load the encryption configuration
 	enc, encDiags := c.Encryption(ctx)
@@ -90,7 +75,7 @@ func (c *PlanCommand) Run(rawArgs []string) int {
 	}
 
 	// Build the operation request
-	opReq, opDiags := c.OperationRequest(ctx, be, view, args.ViewOptions, args.Operation, args.OutPath, args.GenerateConfigPath, enc)
+	opReq, opDiags := c.OperationRequest(ctx, be, view, args.View, args.Operation, args.OutPath, args.GenerateConfigPath, enc)
 	diags = diags.Append(opDiags)
 	if diags.HasErrors() {
 		view.Diagnostics(diags)
@@ -121,8 +106,6 @@ func (c *PlanCommand) Run(rawArgs []string) int {
 }
 
 func (c *PlanCommand) PrepareBackend(ctx context.Context, args *arguments.State, view views.Plan, enc encryption.Encryption) (backend.Enhanced, tfdiags.Diagnostics) {
-	c.Meta.stateArgs = *args
-
 	backendConfig, diags := c.loadBackendConfig(ctx, ".")
 	if diags.HasErrors() {
 		return nil, diags
@@ -145,7 +128,7 @@ func (c *PlanCommand) OperationRequest(
 	ctx context.Context,
 	be backend.Enhanced,
 	view views.Plan,
-	viewOptions arguments.ViewOptions,
+	viewOptions *arguments.View,
 	args *arguments.Operation,
 	planOutPath string,
 	generateConfigOut string,
@@ -175,153 +158,4 @@ func (c *PlanCommand) OperationRequest(
 	}
 
 	return opReq, diags
-}
-
-func (c *PlanCommand) Help() string {
-	helpText := `
-Usage: tofu [global options] plan [options]
-
-  Generates a speculative execution plan, showing what actions OpenTofu would
-  take to apply the current configuration. This command will not actually
-  perform the planned actions.
-
-  You can optionally save the plan to a file, which you can then pass to the
-  "apply" command to perform exactly the actions described in the plan.
-
-Plan Customization Options:
-
-  The following options customize how OpenTofu will produce its plan. You can
-  also use these options when you run "tofu apply" without passing it a saved
-  plan, in order to plan and apply in a single command.
-
-  -destroy                Select the "destroy" planning mode, which creates a
-                          plan to destroy all objects currently managed by this
-                          OpenTofu configuration instead of the usual behavior.
-
-  -refresh-only           Select the "refresh only" planning mode, which checks
-                          whether remote objects still match the outcome of the
-                          most recent OpenTofu apply but does not propose any
-                          actions to undo any changes made outside of OpenTofu.
-
-  -refresh=false          Skip checking for external changes to remote objects
-                          while creating the plan. This can potentially make
-                          planning faster, but at the expense of possibly
-                          planning against a stale record of the remote system
-                          state.
-
-  -replace=resource       Force replacement of a particular resource instance
-                          using its resource address. If the plan would've
-                          otherwise produced an update or no-op action for this
-                          instance, OpenTofu will plan to replace it instead.
-                          You can use this option multiple times to replace
-                          more than one object.
-
-  -target=resource        Limit the planning operation to only the given
-                          module, resource, or resource instance and all of its
-                          dependencies. You can use this option multiple times
-                          to include more than one object. This is for
-                          exceptional use only. Cannot be used alongside the
-                          -exclude option.
-
-  -target-file=filename   Similar to -target, but specifies zero or more
-                          resource addresses from a file.
-
-  -exclude=resource       Limit the planning operation to not operate on the
-                          given module, resource, or resource instance and all
-                          of the resources and modules that depend on it. You
-                          can use this option multiple times to exclude more
-                          than one object. This is for exceptional use only.
-                          Cannot be used together with the -target option.
-
-  -exclude-file=filename  Similar to -exclude, but specifies zero or more
-                          resource addresses from a file.
-
-  -var 'foo=bar'          Set a value for one of the input variables in the
-                          root module of the configuration. Use this option
-                          more than once to set more than one variable.
-
-  -var-file=filename      Load variable values from the given file, in addition
-                          to the default files terraform.tfvars and
-                          *.auto.tfvars. Use this option more than once to
-                          include more than one variables file.
-
-Other Options:
-
-  -compact-warnings            If OpenTofu produces any warnings that are not
-                               accompanied by errors, shows them in a more
-                               compact form that includes only the summary
-                               messages.
-
-  -consolidate-warnings=false  If OpenTofu produces any warnings, do not
-                               attempt to consolidate similar messages. All
-                               locations for all warnings will be listed.
-
-  -consolidate-errors          If OpenTofu produces any errors, attempt to
-                               consolidate similar messages into a single item.
-
-  -detailed-exitcode           Return detailed exit codes when the command
-                               exits. The detailed exit codes are:
-                                 0 - Succeeded but no changes proposed
-                                 1 - Planning failed with an error
-                                 2 - Succeeded and changes are proposed
-
-  -generate-config-out=path    (Experimental) If import blocks are present in
-                               configuration, instructs OpenTofu to generate
-                               HCL for any imported resources not already
-                               present. The configuration is written to a new
-                               file at PATH, which must not already exist.
-                               OpenTofu may still attempt to write
-                               configuration if planning fails with an error.
-
-  -input=false                 Disable prompting for required input variables
-                               that are not set some other way.
-
-  -lock=false                  Don't hold a state lock during the operation.
-                               This is dangerous if others might concurrently
-                               run commands against the same workspace.
-
-  -lock-timeout=duration       Duration to retry a state lock, such as "5s"
-                               to represent five seconds.
-
-  -no-color                    Disable virtual terminal escape sequences.
-
-  -concise                     Disable progress-related messages.
-
-  -out=path                    Write a plan file to the given path. This can be
-                               used as input to the "apply" command.
-
-  -parallelism=n               Limit the number of concurrent operations.
-                               Defaults to 10.
-
-  -state=statefile             A legacy option used for the local backend only.
-                               Refer to the local backend's documentation for
-                               more information.
-
-  -show-sensitive              If specified, sensitive values will not be
-                               redacted in te UI output.
-
-  -json                        Produce output in a machine-readable JSON
-                               format, suitable for use in text editor
-                               integrations and other automated systems.
-
-  -json-into=out.json          Produce the same output as -json, but sent directly
-                               to the given file. This allows automation to preserve
-                               the original human-readable output streams, while
-                               capturing more detailed logs for machine analysis.
-
-  -deprecation=module:m        Specify what type of warnings are shown.
-                               Accepted values for "m": all, local, none. 
-                               Default: all. When "all" is selected, OpenTofu
-                               will show the deprecation warnings for all
-                               modules. When "local" is selected, the warns
-                               will be shown only for the modules that are
-                               imported with a relative path. When "none" is
-                               selected, all the deprecation warnings will be
-                               dropped.
-`
-	return strings.TrimSpace(helpText)
-}
-
-func (c *PlanCommand) Synopsis() string {
-	return "Show changes required by the current configuration"
 }

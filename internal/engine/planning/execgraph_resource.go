@@ -11,6 +11,7 @@ import (
 	"github.com/opentofu/opentofu/internal/addrs"
 	"github.com/opentofu/opentofu/internal/engine/internal/execgraph"
 	"github.com/opentofu/opentofu/internal/plans"
+	"github.com/opentofu/opentofu/internal/resources"
 )
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -24,7 +25,7 @@ import (
 // resource instances belong to.
 func (b *execGraphBuilder) AddResourceInstanceObjectSubgraphs(
 	objs *resourceInstanceObjects,
-	effectiveReplaceOrders addrs.Map[addrs.AbsResourceInstanceObject, resourceInstanceReplaceOrder],
+	effectiveReplaceOrders addrs.Map[addrs.AbsResourceInstanceObject, resources.ReplaceOrder],
 	additionalStateDependencies addrs.Set[addrs.AbsResourceInstance],
 ) {
 	// TODO: We don't currently have any unit tests for this function. If this
@@ -140,8 +141,8 @@ func (b *execGraphBuilder) AddResourceInstanceObjectSubgraphs(
 			// create/delete operations inside each subgraph are already ordered
 			// correctly for the selected replace order, and so we only need
 			// to worry about the connections _between_ the subgraphs.
-			cbdA := effectiveReplaceOrders.Get(addrA) == replaceCreateThenDestroy
-			cbdB := effectiveReplaceOrders.Get(addrB) == replaceCreateThenDestroy
+			cbdA := effectiveReplaceOrders.Get(addrA) == resources.ReplaceCreateFirst
+			cbdB := effectiveReplaceOrders.Get(addrB) == resources.ReplaceCreateFirst
 			if cbdA {
 				// If A is create_before_destroy then we're aiming for an
 				// ordering like this:
@@ -231,7 +232,7 @@ func ensureResourceInstanceObjectSubgraph(addr addrs.AbsResourceInstanceObject, 
 
 func (b *execGraphBuilder) resourceInstanceChangeSubgraph(
 	change *plans.ResourceInstanceChange,
-	effectiveReplaceOrder resourceInstanceReplaceOrder,
+	effectiveReplaceOrder resources.ReplaceOrder,
 ) resourceInstanceObjectSubgraph {
 	resourceMode := change.Addr.Resource.Resource.Mode
 	switch resourceMode {
@@ -328,6 +329,13 @@ func (s *resourceInstanceObjectSubgraph) CreateOrUpdateDependsOn(r execgraph.Any
 func (s *resourceInstanceObjectSubgraph) DeleteDependsOn(r execgraph.AnyResultRef) {
 	if s.addOrphanDep == nil {
 		panic("attempt to add deletion dependency for object that has no deletion leg")
+	}
+	if r == nil {
+		// The stub subgraphs we create for resource instance objects whose results
+		// are needed even though they aren't being changed have a nil deletion
+		// ref because they aren't being deleted, and so we'll silently ignore
+		// that situation here just to centralize this special case in one place.
+		return
 	}
 	s.addOrphanDep(r)
 }

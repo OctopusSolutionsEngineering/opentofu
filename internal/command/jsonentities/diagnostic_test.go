@@ -21,6 +21,7 @@ import (
 	"github.com/hashicorp/hcl/v2/hcltest"
 	"github.com/opentofu/opentofu/internal/command/jsonplan"
 	"github.com/opentofu/opentofu/internal/lang/marks"
+	"github.com/opentofu/opentofu/internal/linting"
 	"github.com/opentofu/opentofu/internal/tfdiags"
 	"github.com/zclconf/go-cty/cty"
 )
@@ -37,8 +38,9 @@ func TestNewDiagnostic(t *testing.T) {
   }
 }
 `)},
-		"short.tf":       {Bytes: []byte("bad source code")},
-		"odd-comment.tf": {Bytes: []byte("foo\n\n#\n")},
+		"just-comment.tf": {Bytes: []byte("# ...")},
+		"short.tf":        {Bytes: []byte("bad source code")},
+		"odd-comment.tf":  {Bytes: []byte("foo\n\n#\n")},
 		"values.tf": {Bytes: []byte(`[
   var.a,
   var.b,
@@ -163,9 +165,9 @@ func TestNewDiagnostic(t *testing.T) {
 				Summary:  "Nonsense input",
 				Detail:   "What you wrote makes no sense",
 				Subject: &hcl.Range{
-					Filename: "short.tf",
-					Start:    hcl.Pos{Line: 1, Column: 5, Byte: 4},
-					End:      hcl.Pos{Line: 1, Column: 10, Byte: 9},
+					Filename: "just-comment.tf",
+					Start:    hcl.Pos{Line: 1, Column: 2, Byte: 1},
+					End:      hcl.Pos{Line: 1, Column: 4, Byte: 3},
 				},
 			},
 			&Diagnostic{
@@ -173,24 +175,24 @@ func TestNewDiagnostic(t *testing.T) {
 				Summary:  "Nonsense input",
 				Detail:   "What you wrote makes no sense",
 				Range: &DiagnosticRange{
-					Filename: "short.tf",
+					Filename: "just-comment.tf",
 					Start: Pos{
 						Line:   1,
-						Column: 5,
-						Byte:   4,
+						Column: 2,
+						Byte:   1,
 					},
 					End: Pos{
 						Line:   1,
-						Column: 10,
-						Byte:   9,
+						Column: 4,
+						Byte:   3,
 					},
 				},
 				Snippet: &DiagnosticSnippet{
 					Context:              nil,
-					Code:                 (`bad source code`),
+					Code:                 (`# ...`),
 					StartLine:            (1),
-					HighlightStartOffset: (4),
-					HighlightEndOffset:   (9),
+					HighlightStartOffset: (1),
+					HighlightEndOffset:   (3),
 					Values:               []DiagnosticExpressionValue{},
 				},
 			},
@@ -267,6 +269,7 @@ func TestNewDiagnostic(t *testing.T) {
 					},
 				},
 				Snippet: &DiagnosticSnippet{
+					Context:              new(`bad "source" "code"`),
 					Code:                 ("bad source code"),
 					StartLine:            (1),
 					HighlightStartOffset: (15),
@@ -1149,6 +1152,40 @@ func TestNewDiagnostic(t *testing.T) {
 							Statement: `is object with 2 attributes`,
 						},
 					},
+				},
+			},
+		},
+		"linting diagnostic with source": {
+			diag: tfdiags.LintMessage(linting.MustParseRuleAddr("core:foo"), nil, "lint diag summary", "lint diag details", &tfdiags.SourceRange{Filename: "test.tf"}, nil),
+			want: &Diagnostic{
+				Severity: DiagnosticSeverityWarning,
+				Summary:  "lint diag summary (core:foo)",
+				Detail:   "lint diag details",
+				Range: &DiagnosticRange{
+					Filename: "test.tf",
+					End:      Pos{Column: 1, Byte: 1},
+				},
+				Snippet: &DiagnosticSnippet{
+					Code:               `resource "test_resource" "test" {`,
+					HighlightEndOffset: 1,
+					Values:             []DiagnosticExpressionValue{},
+				},
+			},
+		},
+		"linting diagnostic with source and groupIDs": {
+			diag: tfdiags.LintMessage(linting.MustParseRuleAddr("foo"), []linting.RuleAddr{linting.MustParseRuleAddr("core:baz")}, "lint diag summary", "lint diag details", &tfdiags.SourceRange{Filename: "test.tf"}, nil),
+			want: &Diagnostic{
+				Severity: DiagnosticSeverityWarning,
+				Summary:  "lint diag summary (foo)",
+				Detail:   "lint diag details",
+				Range: &DiagnosticRange{
+					Filename: "test.tf",
+					End:      Pos{Column: 1, Byte: 1},
+				},
+				Snippet: &DiagnosticSnippet{
+					Code:               `resource "test_resource" "test" {`,
+					HighlightEndOffset: 1,
+					Values:             []DiagnosticExpressionValue{},
 				},
 			},
 		},

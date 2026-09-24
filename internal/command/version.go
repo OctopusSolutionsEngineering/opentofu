@@ -7,13 +7,33 @@ package command
 
 import (
 	"crypto/fips140"
-	"strings"
 
-	"github.com/mitchellh/cli"
 	"github.com/opentofu/opentofu/internal/command/arguments"
 	"github.com/opentofu/opentofu/internal/command/views"
 	"github.com/opentofu/opentofu/internal/getproviders"
 )
+
+func VersionCommander(version string, versionPrerelease string, platform getproviders.Platform) Command {
+	cmd := Command{
+		Name:  "version",
+		Short: "Show the current OpenTofu version",
+		Long:  `Displays the version of OpenTofu and all installed plugins`,
+
+		DiagsWithNewline: true,
+	}
+
+	args := arguments.BindVersion(&cmd.CommandLine)
+	cmd.Run = func(meta Meta) int {
+		return VersionCommand{
+			Meta:              meta,
+			Version:           version,
+			VersionPrerelease: versionPrerelease,
+			Platform:          platform,
+		}.Execute(views.NewVersion(args.View, meta.View))
+	}
+
+	return cmd
+}
 
 // VersionCommand is a Command implementation prints the version.
 type VersionCommand struct {
@@ -24,43 +44,7 @@ type VersionCommand struct {
 	Platform          getproviders.Platform
 }
 
-func (c *VersionCommand) Help() string {
-	helpText := `
-Usage: tofu [global options] version [options]
-
-  Displays the version of OpenTofu and all installed plugins
-
-Options:
-
-  -json       Output the version information as a JSON object.
-`
-	return strings.TrimSpace(helpText)
-}
-
-func (c *VersionCommand) Run(rawArgs []string) int {
-	// new view
-	common, rawArgs := arguments.ParseView(rawArgs)
-	c.View.Configure(common)
-	// Because the legacy UI was using println to show diagnostics and the new view is using, by default, print,
-	// in order to keep functional parity, we setup the view to add a new line after each diagnostic.
-	c.View.DiagsWithNewline()
-
-	// Parse and validate flags
-	args, closer, diags := arguments.ParseVersion(rawArgs)
-	defer closer()
-
-	// Instantiate the view, even if there are flag errors, so that we render
-	// diagnostics according to the desired view
-	view := views.NewVersion(args.ViewOptions, c.View)
-
-	if diags.HasErrors() {
-		view.Diagnostics(diags)
-		if args.ViewOptions.ViewType == arguments.ViewJSON {
-			return 1
-		}
-		return cli.RunResultHelp
-	}
-
+func (c VersionCommand) Execute(view views.Version) int {
 	// We'll also attempt to print out the selected plugin versions. We do
 	// this based on the dependency lock file, and so the result might be
 	// empty or incomplete if the user hasn't successfully run "tofu init"
@@ -79,8 +63,4 @@ func (c *VersionCommand) Run(rawArgs []string) int {
 		return 1
 	}
 	return 0
-}
-
-func (c *VersionCommand) Synopsis() string {
-	return "Show the current OpenTofu version"
 }

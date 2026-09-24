@@ -7,9 +7,7 @@ package command
 
 import (
 	"fmt"
-	"strings"
 
-	"github.com/mitchellh/cli"
 	"github.com/opentofu/opentofu/internal/backend"
 	"github.com/opentofu/opentofu/internal/command/arguments"
 	"github.com/opentofu/opentofu/internal/command/views"
@@ -21,32 +19,36 @@ import (
 	"github.com/opentofu/opentofu/internal/tofu"
 )
 
+func GraphCommander() Command {
+	cmd := Command{
+		Name:  "graph",
+		Short: "Generate a Graphviz graph of the steps in an operation",
+		Long: `Produces a representation of the dependency graph between different objects in the current configuration and state.
+
+The graph is presented in the DOT language. The typical program that can read this format is GraphViz, but many web services are also available to read this format.`,
+
+		DiagsWithNewline: true,
+	}
+
+	args := arguments.BindGraph(&cmd.CommandLine)
+	cmd.Run = func(meta Meta) int {
+		return GraphCommand{meta}.Execute(args, views.NewGraph(meta.View))
+	}
+
+	return cmd
+}
+
 // GraphCommand is a Command implementation that takes a OpenTofu
 // configuration and outputs the dependency tree in graphical form.
 type GraphCommand struct {
 	Meta
 }
 
-func (c *GraphCommand) Run(rawArgs []string) int {
+func (c GraphCommand) Execute(args *arguments.Graph, view views.Graph) int {
+	var diags tfdiags.Diagnostics
+
 	ctx := c.CommandContext()
 
-	common, rawArgs := arguments.ParseView(rawArgs)
-	c.View.Configure(common)
-	// Because the legacy UI was using println to show diagnostics and the new view is using, by default, print,
-	// in order to keep functional parity, we setup the view to add a new line after each diagnostic.
-	c.View.DiagsWithNewline()
-
-	// Parse and validate flags
-	args, closer, diags := arguments.ParseGraph(rawArgs)
-	defer closer()
-
-	// Instantiate the view, even if there are flag errors, so that we render
-	// diagnostics according to the desired view
-	view := views.NewGraph(c.View)
-	if diags.HasErrors() {
-		view.Diagnostics(diags)
-		return cli.RunResultHelp
-	}
 	c.Meta.variableArgs = args.Vars.All()
 
 	// This gets the current directory as full path.
@@ -263,46 +265,4 @@ func (c *GraphCommand) Run(rawArgs []string) int {
 	view.Output(graphStr)
 
 	return 0
-}
-
-func (c *GraphCommand) Help() string {
-	helpText := `
-Usage: tofu [global options] graph [options]
-
-  Produces a representation of the dependency graph between different
-  objects in the current configuration and state.
-
-  The graph is presented in the DOT language. The typical program that can
-  read this format is GraphViz, but many web services are also available
-  to read this format.
-
-Options:
-
-  -plan=tfplan     Render graph using the specified plan file instead of the
-                   configuration in the current directory.
-
-  -draw-cycles     Highlight any cycles in the graph with colored edges.
-                   This helps when diagnosing cycle errors.
-
-  -type=plan       Type of graph to output. Can be: plan, plan-refresh-only,
-                   plan-destroy, or apply. By default OpenTofu chooses
-				   "plan", or "apply" if you also set the -plan=... option.
-
-  -module-depth=n  (deprecated) In prior versions of OpenTofu, specified the
-				   depth of modules to show in the output.
-
-  -var 'foo=bar'     Set a value for one of the input variables in the root
-                     module of the configuration. Use this option more than
-                     once to set more than one variable.
-
-  -var-file=filename Load variable values from the given file, in addition
-                     to the default files terraform.tfvars and *.auto.tfvars.
-                     Use this option more than once to include more than one
-                     variables file.
-`
-	return strings.TrimSpace(helpText)
-}
-
-func (c *GraphCommand) Synopsis() string {
-	return "Generate a Graphviz graph of the steps in an operation"
 }

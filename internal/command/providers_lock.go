@@ -11,7 +11,6 @@ import (
 	"net/url"
 	"os"
 
-	"github.com/mitchellh/cli"
 	"github.com/opentofu/opentofu/internal/addrs"
 	"github.com/opentofu/opentofu/internal/command/arguments"
 	"github.com/opentofu/opentofu/internal/command/cliconfig/ociauthconfig"
@@ -34,6 +33,29 @@ const (
 	providersLockChangeTypeNewHashes   providersLockChangeType = "providersLockChangeTypeNewHashes"
 )
 
+func ProvidersLockCommander() Command {
+	cmd := Command{
+		Name:  "lock",
+		Short: "Write out dependency locks for the configured providers",
+		Long: `Normally the dependency lock file (.terraform.lock.hcl) is updated automatically by "tofu init", but the information available to the normal provider installer can be constrained when you're installing providers from filesystem or network mirrors, and so the generated lock file can end up incomplete.
+
+The "providers lock" subcommand addresses that by updating the lock file based on the official packages available in the origin registry, ignoring the currently-configured installation strategy.
+
+After this command succeeds, the lock file will contain suitable checksums to allow installation of the providers needed by the current configuration on all of the selected platforms.
+
+By default this command updates the lock file for every provider declared in the configuration. You can override that behavior by providing one or more provider source addresses on the command line.`,
+
+		DiagsWithNewline: true,
+	}
+
+	args := arguments.BindProvidersLock(&cmd.CommandLine)
+	cmd.Run = func(meta Meta) int {
+		return ProvidersLockCommand{meta}.Execute(args, views.NewProvidersLock(args.View, meta.View))
+	}
+
+	return cmd
+}
+
 // ProvidersLockCommand is a Command implementation that implements the
 // "tofu providers lock" command, which creates or updates the current
 // configuration's dependency lock file using information from upstream
@@ -43,37 +65,12 @@ type ProvidersLockCommand struct {
 	Meta
 }
 
-func (c *ProvidersLockCommand) Synopsis() string {
-	return "Write out dependency locks for the configured providers"
-}
+func (c ProvidersLockCommand) Execute(args *arguments.ProvidersLock, view views.ProvidersLock) int {
+	var diags tfdiags.Diagnostics
 
-func (c *ProvidersLockCommand) Run(rawArgs []string) int {
 	ctx := c.CommandContext()
 	ctx, span := tracing.Tracer().Start(ctx, "Providers lock")
 	defer span.End()
-
-	// new view
-	common, rawArgs := arguments.ParseView(rawArgs)
-	c.View.Configure(common)
-	// Because the legacy UI was using println to show diagnostics and the new view is using, by default, print,
-	// in order to keep functional parity, we setup the view to add a new line after each diagnostic.
-	c.View.DiagsWithNewline()
-
-	// Parse and validate flags
-	args, closer, diags := arguments.ParseProvidersLock(rawArgs)
-	defer closer()
-
-	// Instantiate the view, even if there are flag errors, so that we render
-	// diagnostics according to the desired view
-	view := views.NewProvidersLock(args.ViewOptions, c.View)
-	if diags.HasErrors() {
-		view.Diagnostics(diags)
-		if args.ViewOptions.ViewType == arguments.ViewJSON {
-			return 1 // in case it's json, do not print the help of the command
-		}
-		return cli.RunResultHelp
-	}
-	c.Meta.variableArgs = args.Vars.All()
 
 	span.SetAttributes(traceattrs.StringSlice("opentofu.provider.lock.targetplatforms", args.OptPlatforms))
 	if args.FsMirrorDir != "" {
@@ -382,96 +379,6 @@ func (c *ProvidersLockCommand) Run(rawArgs []string) int {
 
 	view.UpdatedSuccessfully(madeAnyChange)
 	return 0
-}
-
-func (c *ProvidersLockCommand) Help() string {
-	return `
-Usage: tofu [global options] providers lock [options] [providers...]
-
-  Normally the dependency lock file (.terraform.lock.hcl) is updated
-  automatically by "tofu init", but the information available to the
-  normal provider installer can be constrained when you're installing providers
-  from filesystem or network mirrors, and so the generated lock file can end
-  up incomplete.
-
-  The "providers lock" subcommand addresses that by updating the lock file
-  based on the official packages available in the origin registry, ignoring
-  the currently-configured installation strategy.
-
-  After this command succeeds, the lock file will contain suitable checksums
-  to allow installation of the providers needed by the current configuration
-  on all of the selected platforms.
-
-  By default this command updates the lock file for every provider declared
-  in the configuration. You can override that behavior by providing one or
-  more provider source addresses on the command line.
-
-Options:
-
-  -fs-mirror=dir     Consult the given filesystem mirror directory instead
-                     of the origin registry for each of the given providers.
-
-                     This would be necessary to generate lock file entries for
-                     a provider that is available only via a mirror, and not
-                     published in an upstream registry. In this case, the set
-                     of valid checksums will be limited only to what OpenTofu
-                     can learn from the data in the mirror directory.
-
-  -net-mirror=url    Consult the given network mirror (given as a base URL)
-                     instead of the origin registry for each of the given
-                     providers.
-
-                     This would be necessary to generate lock file entries for
-                     a provider that is available only via a mirror, and not
-                     published in an upstream registry. In this case, the set
-                     of valid checksums will be limited only to what OpenTofu
-                     can learn from the data in the mirror indices.
-
-  -oci-mirror=tmpl   Consult the given OCI registry mirror (given as a template)
-					 instead of the origin registry for each of the given
-					 providers.
-
-                     This would be necessary to generate lock file entries for
-                     a provider that is available only via an OCI mirror, and
-                     not published in an upstream registry.
-
-					 The argument is a Level 1 URI template as defined by RFC 6570,
-					 used to map provider source addresses to OCI repository
-					 addresses. The template can contain {hostname} {namespace}
-					 and {type}.
-
-  -platform=os_arch  Choose a target platform to request package checksums
-                     for.
-
-                     By default OpenTofu will request package checksums
-                     suitable only for the platform where you run this
-                     command. Use this option multiple times to include
-                     checksums for multiple target systems.
-
-                     Target names consist of an operating system and a CPU
-                     architecture. For example, "linux_amd64" selects the
-                     Linux operating system running on an AMD64 or x86_64
-                     CPU. Each provider is available only for a limited
-                     set of target platforms.
-
-  -var 'foo=bar'     Set a value for one of the input variables in the root
-                     module of the configuration. Use this option more than
-                     once to set more than one variable.
-
-  -var-file=filename Load variable values from the given file, in addition
-                     to the default files terraform.tfvars and *.auto.tfvars.
-                     Use this option more than once to include more than one
-                     variables file.
-
-  -json               Produce output in a machine-readable JSON format,
-                      suitable for use in text editor integrations and other
-                      automated systems. Always disables color.
-
-  -json-into=out.json Produce the same output as -json, but sent directly
-                      to the given file. This allows automation to preserve
-                      the original human-readable output streams, while
-                      capturing more detailed logs for machine analysis.
-`
 }
 
 // providersLockCalculateChangeType works out whether there is any difference

@@ -8,9 +8,7 @@ package command
 import (
 	"context"
 	"fmt"
-	"strings"
 
-	"github.com/mitchellh/cli"
 	"github.com/opentofu/opentofu/internal/addrs"
 	"github.com/opentofu/opentofu/internal/command/arguments"
 	"github.com/opentofu/opentofu/internal/command/clistate"
@@ -20,39 +18,45 @@ import (
 	"github.com/opentofu/opentofu/internal/tofu"
 )
 
+func TaintCommander() Command {
+	cmd := Command{
+		Name:  "taint",
+		Short: "Mark a resource instance as not fully functional",
+		Long: `OpenTofu uses the term "tainted" to describe a resource instance which may not be fully functional, either because its creation partially failed or because you've manually marked it as such using
+this command.
+
+This will not modify your infrastructure directly, but subsequent OpenTofu plans will include actions to destroy the remote object and create a new object to replace it.
+
+You can remove the "taint" state from a resource instance using the "tofu untaint" command.
+
+The address is in the usual resource address syntax, such as:
+  aws_instance.foo
+  aws_instance.bar[1]
+  module.foo.module.bar.aws_instance.baz
+
+Use your shell's quoting or escaping syntax to ensure that the address will reach OpenTofu correctly, without any special interpretation.`,
+
+		DiagsWithNewline: true,
+	}
+
+	args := arguments.BindTaint(&cmd.CommandLine, true)
+	cmd.Run = func(meta Meta) int {
+		return TaintCommand{meta}.Execute(args, views.NewTaint(args.View, meta.View))
+	}
+
+	return cmd
+}
+
 // TaintCommand is a cli.Command implementation that manually taints
 // a resource, marking it for recreation.
 type TaintCommand struct {
 	Meta
 }
 
-func (c *TaintCommand) Run(rawArgs []string) int {
+func (c TaintCommand) Execute(args *arguments.Taint, view views.Taint) int {
+	var diags tfdiags.Diagnostics
+
 	ctx := c.CommandContext()
-
-	// new view
-	common, rawArgs := arguments.ParseView(rawArgs)
-	c.View.Configure(common)
-	// Because the legacy UI was using println to show diagnostics and the new view is using, by default, print,
-	// in order to keep functional parity, we setup the view to add a new line after each diagnostic.
-	c.View.DiagsWithNewline()
-
-	// Parse and validate flags
-	args, closer, diags := arguments.ParseTaint(true, rawArgs)
-	defer closer()
-
-	// Instantiate the view, even if there are flag errors, so that we render
-	// diagnostics according to the desired view
-	view := views.NewTaint(args.ViewOptions, c.View)
-
-	if diags.HasErrors() {
-		view.Diagnostics(diags)
-		if args.ViewOptions.ViewType == arguments.ViewJSON {
-			return 1 // in case it's json, do not print the help of the command
-		}
-		return cli.RunResultHelp
-	}
-	c.Meta.variableArgs = args.Vars.All()
-	c.Meta.stateArgs = *args.State
 
 	addr := args.TargetAddress
 
@@ -216,74 +220,6 @@ func (c *TaintCommand) Run(rawArgs []string) int {
 	view.Diagnostics(diags)
 	view.TaintedSuccessfully(addr)
 	return 0
-}
-
-func (c *TaintCommand) Help() string {
-	helpText := `
-Usage: tofu [global options] taint [options] <address>
-
-  OpenTofu uses the term "tainted" to describe a resource instance
-  which may not be fully functional, either because its creation
-  partially failed or because you've manually marked it as such using
-  this command.
-
-  This will not modify your infrastructure directly, but subsequent
-  OpenTofu plans will include actions to destroy the remote object
-  and create a new object to replace it.
-
-  You can remove the "taint" state from a resource instance using
-  the "tofu untaint" command.
-
-  The address is in the usual resource address syntax, such as:
-    aws_instance.foo
-    aws_instance.bar[1]
-    module.foo.module.bar.aws_instance.baz
-
-  Use your shell's quoting or escaping syntax to ensure that the
-  address will reach OpenTofu correctly, without any special
-  interpretation.
-
-Options:
-
-  -allow-missing          If specified, the command will succeed (exit code 0)
-                          even if the resource is missing.
-
-  -lock=false             Don't hold a state lock during the operation. This is
-                          dangerous if others might concurrently run commands
-                          against the same workspace.
-
-  -lock-timeout=0s        Duration to retry a state lock.
-
-  -ignore-remote-version  A rare option used for the remote backend only. See
-                          the remote backend documentation for more information.
-
-  -var 'foo=bar'          Set a value for one of the input variables in the root
-                          module of the configuration. Use this option more than
-                          once to set more than one variable.
-
-  -var-file=filename      Load variable values from the given file, in addition
-                          to the default files terraform.tfvars and *.auto.tfvars.
-                          Use this option more than once to include more than one
-                          variables file.
-
-  -json                   Produce output in a machine-readable JSON format, 
-                          suitable for use in text editor integrations and other 
-                          automated systems. Always disables color.
-
-  -json-into=out.json     Produce the same output as -json, but sent directly
-                          to the given file. This allows automation to preserve
-                          the original human-readable output streams, while
-                          capturing more detailed logs for machine analysis.
-
-  -state, state-out, and -backup are legacy options supported for the local
-  backend only. For more information, see the local backend's documentation.
-
-`
-	return strings.TrimSpace(helpText)
-}
-
-func (c *TaintCommand) Synopsis() string {
-	return "Mark a resource instance as not fully functional"
 }
 
 func (c *TaintCommand) allowMissingExit(name addrs.AbsResourceInstance, view views.Taint) int {

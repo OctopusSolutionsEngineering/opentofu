@@ -11,7 +11,6 @@ import (
 	"os"
 	"strings"
 
-	"github.com/mitchellh/cli"
 	"github.com/opentofu/opentofu/internal/addrs"
 	"github.com/opentofu/opentofu/internal/backend"
 	"github.com/opentofu/opentofu/internal/command/arguments"
@@ -22,43 +21,37 @@ import (
 	"github.com/opentofu/opentofu/internal/tofu"
 )
 
+func ConsoleCommander() Command {
+	cmd := Command{
+		Name:  "console",
+		Short: "Try OpenTofu expressions at an interactive command prompt",
+		Long: `Starts an interactive console for experimenting with OpenTofu interpolations.
+
+This will open an interactive console that you can use to type interpolations into and inspect their values. This command loads the current state. This lets you explore and test interpolations before using them in future configurations.
+
+This command will never modify your state.`,
+
+		DiagsWithNewline: true,
+	}
+
+	args := arguments.BindConsole(&cmd.CommandLine)
+	cmd.Run = func(meta Meta) int {
+		return ConsoleCommand{meta}.Execute(args, views.NewConsole(args.View, meta.View))
+	}
+
+	return cmd
+}
+
 // ConsoleCommand is a Command implementation that starts an interactive
 // console that can be used to try expressions with the current config.
 type ConsoleCommand struct {
 	Meta
 }
 
-func (c *ConsoleCommand) Run(rawArgs []string) int {
+func (c ConsoleCommand) Execute(args *arguments.Console, view views.Console) int {
+	var diags tfdiags.Diagnostics
+
 	ctx := c.CommandContext()
-
-	common, rawArgs := arguments.ParseView(rawArgs)
-	c.View.Configure(common)
-	// Because the legacy UI was using println to show diagnostics and the new view is using, by default, print,
-	// in order to keep functional parity, we setup the view to add a new line after each diagnostic.
-	c.View.DiagsWithNewline()
-
-	// Parse and validate flags
-	args, closer, diags := arguments.ParseConsole(rawArgs)
-	defer closer()
-
-	// Instantiate the view, even if there are flag errors, so that we render
-	// diagnostics according to the desired view
-	view := views.NewConsole(args.ViewOptions, c.View)
-	if diags.HasErrors() {
-		view.Diagnostics(diags)
-		if args.ViewOptions.ViewType == arguments.ViewJSON {
-			return 1
-		}
-		return cli.RunResultHelp
-	}
-	c.Meta.stateArgs = *args.State
-
-	// FIXME: the -input flag value is needed to initialize the backend and the
-	// operation, but there is no clear path to pass this value down, so we
-	// continue to mutate the Meta object state for now.
-	c.Meta.input = args.ViewOptions.InputEnabled
-
-	c.Meta.variableArgs = args.Vars.All()
 
 	configPath := c.WorkingDir.NormalizePath(c.WorkingDir.RootModuleDir())
 
@@ -223,60 +216,4 @@ func (c *ConsoleCommand) modePiped(session *repl.Session, view views.Console) in
 	}
 
 	return 0
-}
-
-func (c *ConsoleCommand) Help() string {
-	helpText := `
-Usage: tofu [global options] console [options]
-
-  Starts an interactive console for experimenting with OpenTofu
-  interpolations.
-
-  This will open an interactive console that you can use to type
-  interpolations into and inspect their values. This command loads the
-  current state. This lets you explore and test interpolations before
-  using them in future configurations.
-
-  This command will never modify your state.
-
-Options:
-
-  -compact-warnings      If OpenTofu produces any warnings that are not
-                         accompanied by errors, show them in a more compact
-                         form that includes only the summary messages.
-
-  -consolidate-warnings  If OpenTofu produces any warnings, no consolidation
-                         will be performed. All locations, for all warnings
-                         will be listed. Enabled by default.
-
-  -consolidate-errors    If OpenTofu produces any errors, no consolidation
-                         will be performed. All locations, for all errors
-                         will be listed. Disabled by default
-
-  -state=path            Legacy option for the local backend only. See the local
-                         backend's documentation for more information.
-
-  -var 'foo=bar'         Set a variable in the OpenTofu configuration. This
-                         flag can be set multiple times.
-
-  -var-file=foo          Set variables in the OpenTofu configuration from
-                         a file. If "terraform.tfvars" or any ".auto.tfvars"
-                         files are present, they will be automatically loaded.
-
-  -lock=false            Don't hold a state lock during the operation. This is
-                         dangerous if others might concurrently run commands
-                         against the same workspace.
-
-  -lock-timeout=0s       Duration to retry a state lock.
-
-  -json-into=out.json    Streams the output of the console, to the given file. 
-                         This allows automation to preserve
-                         the original human-readable output streams, while
-                         capturing more detailed logs for machine analysis.
-`
-	return strings.TrimSpace(helpText)
-}
-
-func (c *ConsoleCommand) Synopsis() string {
-	return "Try OpenTofu expressions at an interactive command prompt"
 }

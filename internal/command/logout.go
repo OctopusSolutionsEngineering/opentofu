@@ -7,10 +7,7 @@ package command
 
 import (
 	"fmt"
-	"path/filepath"
-	"strings"
 
-	"github.com/mitchellh/cli"
 	"github.com/opentofu/opentofu/internal/command/arguments"
 	"github.com/opentofu/opentofu/internal/command/views"
 	"github.com/opentofu/opentofu/internal/tracing"
@@ -20,43 +17,37 @@ import (
 	"github.com/opentofu/opentofu/internal/tfdiags"
 )
 
+func LogoutCommander() Command {
+	cmd := Command{
+		Name:  "logout",
+		Short: "Remove locally-stored credentials for a remote host",
+		Long: `Removes locally-stored credentials for specified hostname.
+
+Note: the API token is only removed from local storage, not destroyed on the remote server, so it will remain valid until manually revoked.`,
+
+		DiagsWithNewline: true,
+	}
+
+	args := arguments.BindLogout(&cmd.CommandLine)
+	cmd.Run = func(meta Meta) int {
+		return LogoutCommand{meta}.Execute(args, views.NewLogout(args.View, meta.View))
+	}
+
+	return cmd
+}
+
 // LogoutCommand is a Command implementation which removes stored credentials
 // for a remote service host.
 type LogoutCommand struct {
 	Meta
 }
 
-// Run implements cli.Command.
-func (c *LogoutCommand) Run(rawArgs []string) int {
+func (c LogoutCommand) Execute(args *arguments.Logout, view views.Logout) int {
+	var diags tfdiags.Diagnostics
+
 	ctx := c.CommandContext()
 	ctx, span := tracing.Tracer().Start(ctx, "Logout")
 	defer span.End()
-
-	common, rawArgs := arguments.ParseView(rawArgs)
-	c.View.Configure(common)
-	// Because the legacy UI was using println to show diagnostics and the new view is using, by default, print,
-	// in order to keep functional parity, we setup the view to add a new line after each diagnostic.
-	c.View.DiagsWithNewline()
-
-	// Parse and validate flags
-	args, closer, diags := arguments.ParseLogout(rawArgs)
-	defer closer()
-
-	// Instantiate the view, even if there are flag errors, so that we render
-	// diagnostics according to the desired view
-	view := views.NewLogout(args.ViewOptions, c.View)
-	if diags.HasErrors() {
-		view.Diagnostics(diags)
-		if args.ViewOptions.ViewType == arguments.ViewJSON {
-			return 1
-		}
-		return cli.RunResultHelp
-	}
-
-	// FIXME: the -input flag value is needed to initialize the backend and the
-	// operation, but there is no clear path to pass this value down, so we
-	// continue to mutate the Meta object state for now.
-	c.Meta.input = args.ViewOptions.InputEnabled
 
 	givenHostname := args.Host
 
@@ -125,41 +116,4 @@ func (c *LogoutCommand) Run(rawArgs []string) int {
 	view.LogoutSuccess(dispHostname)
 
 	return 0
-}
-
-// Help implements cli.Command.
-func (c *LogoutCommand) Help() string {
-	defaultFile := c.defaultOutputFile()
-	if defaultFile == "" {
-		// Because this is just for the help message and it's very unlikely
-		// that a user wouldn't have a functioning home directory anyway,
-		// we'll just use a placeholder here. The real command has some
-		// more complex behavior for this case. This result is not correct
-		// on all platforms, but given how unlikely we are to hit this case
-		// that seems okay.
-		defaultFile = "~/.terraform/credentials.tfrc.json"
-	}
-
-	helpText := fmt.Sprintf(`
-Usage: tofu [global options] logout [hostname]
-
-  Removes locally-stored credentials for specified hostname.
-
-  Note: the API token is only removed from local storage, not destroyed on the
-  remote server, so it will remain valid until manually revoked.
-      %s
-`, defaultFile)
-	return strings.TrimSpace(helpText)
-}
-
-// Synopsis implements cli.Command.
-func (c *LogoutCommand) Synopsis() string {
-	return "Remove locally-stored credentials for a remote host"
-}
-
-func (c *LogoutCommand) defaultOutputFile() string {
-	if c.SystemCfg.CLIConfigDir == "" {
-		return "" // no default available
-	}
-	return filepath.Join(c.SystemCfg.CLIConfigDir, "credentials.tfrc.json")
 }

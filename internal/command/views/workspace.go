@@ -48,7 +48,7 @@ type Workspace interface {
 }
 
 // NewWorkspace returns an initialized Workspace implementation for the given ViewType.
-func NewWorkspace(args arguments.ViewOptions, view *View) Workspace {
+func NewWorkspace(args *arguments.View, view *View) Workspace {
 	var ret Workspace
 	switch args.ViewType {
 	case arguments.ViewJSON:
@@ -181,7 +181,8 @@ func (v *WorkspaceHuman) WorkspaceAlreadyExists(name string) {
 	v.Diagnostics(tfdiags.Diagnostics{tfdiags.Sourceless(
 		tfdiags.Error,
 		fmt.Sprintf("Workspace %q already exists", name),
-		"A workspace having the given name already exists",
+		fmt.Sprintf(`A workspace having the given name already exists.
+Use "tofu workspace select %s" to switch to it.`, name),
 	)})
 }
 
@@ -304,7 +305,7 @@ func (v *WorkspaceJSON) Diagnostics(diags tfdiags.Diagnostics) {
 }
 
 func (v *WorkspaceJSON) WorkspaceAlreadyExists(name string) {
-	v.view.Error(fmt.Sprintf("Workspace %q already exists", name))
+	v.view.Error(fmt.Sprintf("Workspace %q already exists. Use \"tofu workspace select %s\" to switch to it", name, name))
 }
 
 func (v *WorkspaceJSON) WorkspaceDoesNotExist(name string) {
